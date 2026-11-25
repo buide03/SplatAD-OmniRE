@@ -6,10 +6,8 @@ import torch
 
 from .evaluate import camera_indices, camera_sample, lidar_sample, load_checkpoint
 from .model import POSE_GROUPS
+from .pose_monitor import POSE_ATTRS, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
-from .train import drift, finite_number, gradient_stats
-
-POSE_ATTRS = ("translation", "root", "body")
 
 
 def fixed_observation(manifest, model, sensor):

@@ -275,6 +275,13 @@ def inventory(args):
                 distance = float(np.linalg.norm(center - camera[1]))
                 visible = review.get("limbs_visible")
                 occlusion = review.get("occlusion")
+                silhouette = review.get("silhouette_xy")
+                if silhouette is not None:
+                    polygon = np.asarray(silhouette, dtype=float)
+                    if (polygon.ndim != 2 or polygon.shape[0] < 3 or polygon.shape[1] != 2
+                            or not np.isfinite(polygon).all() or (polygon < 0).any()
+                            or (polygon >= [w, h]).any()):
+                        raise ValueError(f"Invalid silhouette for {uuid}, {name}, frame {f}")
                 pose_source = usable.get((uuid, f))
                 rows.append({
                     "scene_id": args.scene, "uuid": uuid, "camera": name, "frame": f, "scan": f,
@@ -287,6 +294,8 @@ def inventory(args):
                     "usable": visible is not False and (visible is True or y2 - y1 >= args.min_height),
                     "stationary": bool(box["stationary"]),
                     "keypoints": review.get("keypoints", {}),
+                    "silhouette_xy": silhouette,
+                    "pose_monitor": bool(review.get("pose_monitor", False)),
                 })
     by_frame = {}
     for row in rows:

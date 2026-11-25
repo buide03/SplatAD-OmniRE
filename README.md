@@ -14,7 +14,7 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và chọn GPU.
 2. Đặt `SMPL_NEUTRAL.pkl` từ bản SMPL Neutral v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. Trọng số SMPL được cung cấp riêng qua trang chính thức. [SMPL](https://smpl.is.tue.mpg.de/)
 3. Chạy các cell với `STAGE = "smoke"` để dùng cảnh `011/front_right`, 200 bước cho mỗi cấu hình. Đặt `STAGE = "pilot"` để chạy 1.200 bước trên ba cảnh, hoặc `"confirm"` cho 4.000 bước. Giữ `RUN_ID` và chọn `"confirm"` để tiếp tục lịch train của run pilot.
-4. Dashboard hiển thị ở cell cuối. Cấu hình chạy, checkpoint, metric, log và video lưu trên Google Drive dưới `MyDrive/SplatAD-OmniRE/`.
+4. Mở dashboard ở cell **Xem hiệu chỉnh SMPL trong lúc train**. Cấu hình chạy, checkpoint, monitor, metric, log và video lưu trên Google Drive dưới `MyDrive/SplatAD-OmniRE/`.
 
 Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
 
@@ -39,6 +39,14 @@ Dữ liệu tải theo scene từ archive PandaSet đã pin. Bộ pose công kha
 | `008` | Sàng lọc nhiều track ở ≥30 m | 47 | 30 |
 
 Số liệu lấy từ sáu camera, pose OmniRe công khai và SMPL Neutral v1.0 dùng cho phép kiểm kê CPU. [protocol/pilot.json](protocol/pilot.json) ghi số frame, độ bao phủ và hit LiDAR trước review. Các JSON review đi kèm ghi những crop đã kiểm tra. Cảnh 008 có nhiều vùng bị lan can, xe hoặc bồn cây che chân. Đánh giá chuyển động chi ở cự ly xa cần bổ sung review trực tiếp trên frame đã chọn. Notebook mặc định dùng Neutral v1.1 cho các run GPU.
+### Monitor hiệu chỉnh SMPL
+
+- **Mesh chiếu.** Mục **Hiệu chỉnh SMPL** hiển thị RGB gốc, mesh khởi tạo và mesh tại từng mốc với cùng hiệu chuẩn camera. IoU đo silhouette mesh với polygon vẽ tay. Nếu có keypoint GT, monitor ghi sai số điểm chiếu bằng pixel. Khi thiếu nhãn hình học, dùng ảnh overlay để kiểm tra trực quan.
+- **RGB vùng người.** Monitor tính L1/MAE từ ảnh toàn cảnh đã render trên cùng mask người hoặc crop bbox cố định. So sánh qua các mốc bằng cột `RGB MAE`. Đây là chỉ số theo dõi vùng người. Loss train tiếp tục lấy từ cấu hình SplatAD toàn cảnh.
+- **Probe gradient R2.** Tính gradient từ loss RGB toàn cảnh của cùng một ảnh, thử một bước Adam mới với learning rate hiện hành và chỉ đổi các hàng pose đang hoạt động của UUID này. Monitor đo lại loss, RGB MAE và mesh IoU sau bước thử rồi khôi phục pose. Bảng cập nhật train thật ghi riêng norm gradient và dịch chuyển tham số khi batch train lấy đúng ảnh đó. IoU tăng hoặc lỗi điểm chiếu giảm mới là dấu hiệu mesh sát ảnh hơn.
+
+Cảnh `011/front_right` có một silhouette gần được vẽ tay tại frame 8 trong [protocol/011-review.json](protocol/011-review.json). Với quan sát khác, dùng `pose_monitor: true` trong tệp review để chọn frame theo dõi và `silhouette_xy` để khai báo polygon theo tọa độ pixel ảnh gốc. Dashboard tự đọc `monitor.json` và ảnh theo mốc từ thư mục `artifacts/<run_id>/<scene>-<variant>-pose`. Smoke ghi mốc 0, mỗi 50 bước và bước cuối. Khi resume run cũ, giữ `RUN_ID` và `PREP_TAG` cũ để dùng đúng manifest.
+
 ### Nhãn kiểm tra thủ công
 
 Đặt tệp `inputs/011-review.json` trên Drive trước khi tạo manifest. Để tạo lại một bộ probe với nhãn mới, dùng manifest và mã run mới cho cả ba cấu hình.

@@ -40,6 +40,7 @@ class PedestrianModel(SplatADModel):
         self.people = nn.ModuleList()
         self.person_index = {}
         self.last_sensor = None
+        self.last_rgb_index = None
         self.last_actor_time = None
         cfg = self.config
         metadata = self.kwargs["metadata"]
@@ -112,6 +113,8 @@ class PedestrianModel(SplatADModel):
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         if self.training:
             self.last_sensor = "rgb" if "image" in batch else "lidar"
+            image_index = batch.get("image_idx") if self.last_sensor == "rgb" else None
+            self.last_rgb_index = int(image_index) if image_index is not None else None
         return super().get_loss_dict(outputs, batch, metrics_dict)
 
     def get_param_groups(self):

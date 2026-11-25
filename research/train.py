@@ -2,7 +2,6 @@
 import argparse
 import copy
 import json
-import math
 import os
 from collections import Counter
 from dataclasses import dataclass, field, fields
@@ -12,7 +11,6 @@ from typing import Type
 
 import torch
 import yaml
-from torch.nn import functional as F
 
 from nerfstudio.configs.method_configs import method_configs
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackLocation
@@ -22,34 +20,8 @@ from nerfstudio.models.splatad import SplatADModelConfig
 from nerfstudio.scripts.train import main as launch
 
 from .model import POSE_GROUPS, PedestrianModelConfig
+from .pose_monitor import POSE_ATTRS, PoseMonitor, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
-
-
-def finite_number(number):
-    return number if math.isfinite(number) else None
-
-
-def gradient_stats(parameters, indices=None):
-    values = [p.grad.detach() for p in parameters if p.grad is not None]
-    if indices is not None:
-        values = [value[indices] for value in values]
-    if not values:
-        return {"state": "none", "norm": None, "parameters_with_grad": 0}
-    norm = torch.linalg.vector_norm(torch.stack([g.float().norm() for g in values])).item()
-    state = "non_finite" if not math.isfinite(norm) else ("zero" if norm == 0 else "finite")
-    return {"state": state, "norm": finite_number(norm), "parameters_with_grad": len(values)}
-
-
-def drift(current, reference, rotation):
-    if rotation:
-        cos = (F.normalize(current, dim=-1) * F.normalize(reference, dim=-1)).sum(-1, keepdim=True)
-        aligned = torch.where(cos < 0, -reference, reference)
-        chord = (F.normalize(current, dim=-1) - F.normalize(aligned, dim=-1)).norm(dim=-1)
-        displacement = 4 * torch.rad2deg((chord / 2).clamp(0, 1).asin())
-    else:
-        displacement = (current - reference).norm(dim=-1) * 100
-    return {"mean": finite_number(displacement.mean().item()), "max": finite_number(displacement.max().item()),
-            "unit": "deg" if rotation else "cm"}
 
 
 def append_jsonl(path, row):
@@ -62,6 +34,8 @@ class ResearchConfig(TrainerConfig):
     _target: Type = field(default_factory=lambda: ResearchTrainer)
     monitor_interval: int = 250
     gradient_interval: int = 25
+    pose_monitor_interval: int = 50
+    pose_monitor_dir: Path | None = None
 
 
 class ResearchTrainer(Trainer):
@@ -101,6 +75,15 @@ class ResearchTrainer(Trainer):
         # A stats file may be newer than the checkpoint after an interruption.
         if self.previous and self.previous["step"] != self._start_step - 1:
             self.previous = {}
+        self.pose_monitor = None
+        if self.config.pose_monitor_interval and model.people:
+            monitor = PoseMonitor(
+                self.pipeline, read_json(model.config.manifest_path),
+                self.config.pose_monitor_dir or self.base_dir / "pose_monitor",
+                self.config.timestamp, self._start_step, model.config.manifest_digest,
+            )
+            if monitor.observations:
+                self.pose_monitor = monitor
         self.callbacks.extend([
             TrainingCallback([TrainingCallbackLocation.BEFORE_TRAIN_ITERATION], self.initial_monitor),
             TrainingCallback([TrainingCallbackLocation.AFTER_TRAIN_ITERATION], self.periodic_monitor),
@@ -111,16 +94,21 @@ class ResearchTrainer(Trainer):
         model = self.pipeline.model
         sample = min(self.last_logged.get(sensor, -self.config.gradient_interval)
                      for sensor in ("rgb", "lidar")) <= step - self.config.gradient_interval
+        watched = self.pose_monitor.watched_uuids if self.pose_monitor else ()
         with torch.no_grad():
-            before = [{name: getattr(node, name).detach().clone() for name in ("translation", "root", "body")}
-                      for node in model.people] if sample else []
+            before = {node.uuid: {name: getattr(node, name).detach().clone() for name in POSE_ATTRS}
+                      for node in model.people if sample or node.uuid in watched}
         loss, losses, metrics = super().train_iteration(step)
         sensor = model.last_sensor
         self.sensor_counts[sensor] += 1
-        if step - self.last_logged.get(sensor, -self.config.gradient_interval) >= self.config.gradient_interval:
+        due = step - self.last_logged.get(sensor, -self.config.gradient_interval) >= self.config.gradient_interval
+        fixed_rgb = self.pose_monitor and model.last_rgb_index in self.pose_monitor.watched_indices
+        if due:
             self.last_logged[sensor] = step
+        if due or fixed_rgb:
             groups = model.get_param_groups()
             row = {"step": step, "sensor": sensor, "scene_loss": finite_number(float(loss.detach())),
+                   "image_index": model.last_rgb_index,
                    "loss_terms": {name: finite_number(float(value.detach())) for name, value in losses.items()}}
             row["gradients"] = {tag: gradient_stats(groups.get(tag, [])) for tag in POSE_GROUPS}
             row["gradients"]["smpl_gaussians"] = gradient_stats(
@@ -128,7 +116,10 @@ class ResearchTrainer(Trainer):
             )
             row["pose"] = {}
             with torch.no_grad():
-                for previous, node in zip(before, model.people, strict=True):
+                for node in model.people:
+                    if node.uuid not in before:
+                        continue
+                    previous = before[node.uuid]
                     lo, hi, _, visible = node._span(model.last_actor_time.to(node.times).reshape(()))
                     if not bool(visible):
                         continue
@@ -145,6 +136,8 @@ class ResearchTrainer(Trainer):
                         for name in previous
                     }
             append_jsonl(self.base_dir / "training.jsonl", row)
+            if fixed_rgb:
+                self.pose_monitor.observe_training_step(row)
         return loss, losses, metrics
 
     def monitor(self, step):
@@ -159,6 +152,18 @@ class ResearchTrainer(Trainer):
     def initial_monitor(self, step):
         if step == 0 and self.config.monitor_interval:
             self.monitor(0)
+        if self.pose_monitor and step == self._start_step and not self.pose_monitor.steps:
+            self.record_pose_monitor(step)
+
+    def record_pose_monitor(self, step):
+        if not self.pose_monitor or (self.pose_monitor.steps and self.pose_monitor.steps[-1]["step"] == step):
+            return
+        start = perf_counter()
+        rates = []
+        if self.pipeline.model.config.variant == "R2":
+            rates = [self.optimizers.optimizers[name].param_groups[0]["lr"] for name in POSE_GROUPS]
+        self.pose_monitor.capture(step, rates)
+        self.monitor_seconds += perf_counter() - start
 
     def write_stats(self, step, seconds):
         prior_counts = Counter(self.previous.get("sensor_batches", {}))
@@ -174,12 +179,15 @@ class ResearchTrainer(Trainer):
         interval = self.config.monitor_interval
         if interval and (step + 1) % interval == 0:
             self.monitor(step + 1)
+        if self.pose_monitor and (step + 1) % self.config.pose_monitor_interval == 0:
+            self.record_pose_monitor(step + 1)
         if self.config.steps_per_save and (step % self.config.steps_per_save == 0):
             self.write_stats(step, perf_counter() - self.run_start - self.monitor_seconds)
 
     def final_monitor(self, step):
         if self.config.monitor_interval and (step + 1) % self.config.monitor_interval:
             self.monitor(step + 1)
+        self.record_pose_monitor(step + 1)
         self.write_stats(step, perf_counter() - self.run_start - self.monitor_seconds)
 
 
@@ -202,6 +210,9 @@ def make_config(args):
     config.machine.num_devices = 1
     config.monitor_interval = args.monitor_every
     config.gradient_interval = args.gradient_every
+    if args.pose_monitor_every is not None:
+        config.pose_monitor_interval = args.pose_monitor_every
+    config.pose_monitor_dir = args.pose_monitor_dir.resolve() if args.pose_monitor_dir else None
     model = {f.name: getattr(base.pipeline.model, f.name) for f in fields(SplatADModelConfig) if f.name != "_target"}
     manifest = args.manifest.resolve() if args.manifest else None
     if manifest:
@@ -248,6 +259,8 @@ def main():
     parser.add_argument("--checkpoint-every", type=int, default=250)
     parser.add_argument("--monitor-every", type=int, default=250)
     parser.add_argument("--gradient-every", type=int, default=25)
+    parser.add_argument("--pose-monitor-every", type=int, help="RGB pose monitor interval, use 0 to disable")
+    parser.add_argument("--pose-monitor-dir", type=Path, help="Dashboard artifact folder for live SMPL monitoring")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--seed-points", type=int, default=250000)
     parser.add_argument("--far-points", type=int, default=80000)
@@ -260,6 +273,8 @@ def main():
         parser.error("A CUDA GPU is required. In Colab select a GPU runtime and run bootstrap first.")
     if args.steps < 1 or args.gradient_every < 1 or args.monitor_every < 0 or args.checkpoint_every < 1:
         parser.error("Invalid step intervals")
+    if args.pose_monitor_every is not None and args.pose_monitor_every < 0:
+        parser.error("The pose monitor interval must be nonnegative")
     if args.resume:
         if not args.checkpoint:
             parser.error("--resume requires --checkpoint")
@@ -269,6 +284,10 @@ def main():
         config.load_dir = None
         config.load_checkpoint = args.checkpoint.resolve()
         config.max_num_iterations = args.steps
+        if args.pose_monitor_every is not None:
+            config.pose_monitor_interval = args.pose_monitor_every
+        if args.pose_monitor_dir:
+            config.pose_monitor_dir = args.pose_monitor_dir.resolve()
     else:
         if args.raw is None or (args.variant != "R0" and not all((args.tracks, args.body, args.manifest))):
             parser.error("Supply --raw and, for R1/R2, --tracks, --body and --manifest")

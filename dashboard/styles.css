@@ -91,3 +91,13 @@ footer {padding:26px 0 12px;color:var(--muted);font-size:12px}
 @media (max-width:510px) {.top{height:auto;flex-wrap:wrap;gap:10px;padding-top:13px}.brand{font-size:19px}nav{width:100%;height:40px}.filters{width:100%;flex-wrap:wrap;gap:6px}select{min-width:64px;max-width:160px}.metric-grid{grid-template-columns:1fr 1fr}.transport{gap:7px}.screen{margin:0 8px}.card-head{padding:12px}.video-label{top:8px;left:8px}.table-wrap{max-height:245px}}
 .coverage-title {border-top:1px solid #e7eee9;margin:14px 16px 0;padding-top:15px;font-size:14px}
 .coverage {padding-top:2px;padding-bottom:12px}
+.pose-evidence {margin-bottom:16px}
+.pose-evidence .evidence-panels {grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
+.pose-evidence figure img {height:clamp(120px,17vw,220px)}
+.pose-monitor-grid .pose-gradient-card {grid-column:1/-1}
+#pose-history button[aria-pressed="true"] {text-decoration:underline}
+#pose-detail {overflow-wrap:anywhere}
+@media (max-width:510px) {
+  .top nav {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;height:auto}
+  .top nav a {min-height:34px;justify-items:start}
+}

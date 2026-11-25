@@ -8,6 +8,7 @@
   <title>SplatAD / OmniRE · PandaSet Replay</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
+  <script src="/pose-monitor.js" defer></script>
 </head>
 <body>
   <header class="top">
@@ -15,6 +16,7 @@
     <nav aria-label="Điều hướng">
       <a class="active" href="#replay">Phát lại cảnh</a>
       <a href="#observations">Quan sát</a>
+      <a href="#pose-monitor">Hiệu chỉnh SMPL</a>
       <a href="#training">Huấn luyện</a>
     </nav>
     <span class="project">PANDASET RESEARCH</span>
@@ -97,6 +99,52 @@
             </table>
           </div>
         </article>
+      </div>
+    </section>
+
+    <section class="section" id="pose-monitor">
+      <div class="section-head">
+        <div><p class="eyebrow"><span></span> RGB theo UUID, camera và frame</p><h2>Hiệu chỉnh SMPL</h2></div>
+        <div class="filters">
+          <label>Run theo dõi <select id="pose-run"></select></label>
+          <label>Quan sát <select id="pose-observation"></select></label>
+        </div>
+      </div>
+      <p id="pose-status" class="note" role="status">Đang tìm dữ liệu monitor.</p>
+      <div id="pose-results" hidden>
+        <article class="card pose-evidence">
+          <div class="card-head"><div><h2>Mesh và RGB trên cùng ảnh</h2><span id="pose-detail"></span></div></div>
+          <div id="pose-panels" class="evidence-panels"></div>
+        </article>
+        <div class="observation-grid pose-monitor-grid">
+          <article class="card table-card">
+            <div class="card-head"><div><h2>Diễn tiến qua các bước train</h2><span id="pose-roi"></span></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Bước</th><th>RGB MAE ↓</th><th>IoU mesh ↑</th><th>Lỗi điểm chiếu ↓</th></tr></thead>
+                <tbody id="pose-history"></tbody>
+              </table>
+            </div>
+          </article>
+          <article class="card table-card">
+            <div class="card-head"><div><h2>Probe pose từ loss RGB toàn cảnh</h2><span id="pose-probe-detail"></span></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Chỉ số</th><th>Trước</th><th>Sau</th><th>Thay đổi</th></tr></thead>
+                <tbody id="pose-probe"></tbody>
+              </table>
+            </div>
+          </article>
+          <article class="card table-card pose-gradient-card">
+            <div class="card-head"><div><h2>Gradient probe và cập nhật train thật</h2><span id="pose-gradient-detail"></span></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Nhóm pose</th><th>Norm probe</th><th>Δ probe</th><th>Norm train</th><th>Δ train</th></tr></thead>
+                <tbody id="pose-gradients"></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
       </div>
     </section>
 

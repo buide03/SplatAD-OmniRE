@@ -22,8 +22,8 @@ function options(select, values, preferred, empty) {
   else if (values.some(([value]) => value === preferred)) select.value = preferred;
 }
 
-function artifact(file) {
-  return "/artifacts/" + [state.record.path, file].filter(p => p && p !== ".")
+function artifact(file, record = state.record) {
+  return "/artifacts/" + [record.path, file].filter(p => p && p !== ".")
     .join("/").split("/").map(encodeURIComponent).join("/");
 }
 
@@ -337,7 +337,7 @@ for (const anchor of document.querySelectorAll("nav a")) {
 }
 (async function init() {
   try {
-    state.runs = await (await load("/api/runs")).json();
+    state.runs = (await (await load("/api/runs")).json()).filter(run => run.mode !== "pose_monitor");
     options(selector.scene, [...new Set(state.runs.map(r => String(r.scene)))].map(s => [s, s]), "", "Chưa có cảnh");
     updateScene();
   } catch {
