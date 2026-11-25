@@ -11,14 +11,14 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 
 ### Bắt đầu trên Colab
 
-1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và chọn GPU.
-2. Đặt `SMPL_NEUTRAL.pkl` từ bản SMPL Neutral v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. Trọng số SMPL được cung cấp riêng qua trang chính thức. [SMPL](https://smpl.is.tue.mpg.de/)
-3. Chạy các cell với `STAGE = "smoke"` để dùng cảnh `011/front_right`, 200 bước cho mỗi cấu hình. Đặt `STAGE = "pilot"` để chạy 1.200 bước trên ba cảnh, hoặc `"confirm"` cho 4.000 bước. Giữ `RUN_ID` và chọn `"confirm"` để tiếp tục lịch train của run pilot.
-4. Mở dashboard ở cell **Xem hiệu chỉnh SMPL trong lúc train**. Cấu hình chạy, checkpoint, monitor, metric, log và video lưu trên Google Drive dưới `MyDrive/SplatAD-OmniRE/`.
+1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` cho tự dò trong My Drive và Shared Drives, hoặc nhập đường dẫn như `/content/drive/MyDrive/datasets/pandaset` hay `/content/drive/MyDrive/pandaset.zip`. Thư mục đã giải nén được đọc trực tiếp. Với ZIP, Colab giải nén các scene đã chọn vào `/content/pandaset-from-drive`. Notebook kiểm tra đủ 80 ảnh mỗi camera đã chọn, scan LiDAR và cuboid của scene.
+2. Chạy cell **Xem ba camera gốc và monitor** để xem scene đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt SMPL Neutral v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
+3. Mặc định `STAGE = "scene"` train R2 trên cả ba camera trước của cảnh `011`, rồi render toàn cảnh. Đổi `SCENES = ["011", "028"]` để chọn nhiều scene. Đặt `SCENES = "all"` để dùng toàn bộ scene phát hiện trên Drive. Chọn `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. R1/R2 cần bộ pose OmniRe tương ứng cho từng scene. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
+4. Sau mỗi checkpoint, notebook xuất clip của từng camera ở độ phân giải render và clip `front-triptych.mp4`. Chọn **Ba camera trước** trong dashboard để phát hoặc tua trái, giữa, phải trên cùng timeline. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
 
 Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
 
-Dữ liệu tải theo scene từ archive PandaSet đã pin. Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_PUBLIC_POSES = False` cho cảnh cần chạy lại 4D-Humans. Nhánh này dùng môi trường Python 3.10 riêng. [PandaSet](https://huggingface.co/datasets/georghess/pandaset) · [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
+Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_PUBLIC_POSES = False` cho cảnh cần chạy lại 4D-Humans. Nhánh này dùng đủ sáu camera và môi trường Python 3.10 riêng. [PandaSet](https://huggingface.co/datasets/georghess/pandaset) · [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
 
 ### Quy ước và số liệu
 
@@ -28,7 +28,7 @@ Dữ liệu tải theo scene từ archive PandaSet đã pin. Bộ pose công kha
 - **RGB.** Render đủ nền, xe và người tại frame gốc. Tính MAE, PSNR, SSIM và LPIPS AlexNet cho toàn ảnh và crop GT. Crop mở rộng tối thiểu 64 × 64 px và giữ mật độ pixel. Trường hợp ảnh khớp hoàn toàn dùng PSNR 120 dB để lưu JSON.
 - **LiDAR.** Range MAE tính trên tia có phản hồi GT nằm trong cuboid của UUID, xác định từ chính raster đã dùng để render. Xuất số hit trước và sau lọc quantile. Thiếu hit được ghi là thiếu mẫu. Range panel hiển thị batch raster đầu tiên, metric dùng toàn bộ batch.
 - **Tổng hợp.** Đối chiếu trên khóa scene/UUID/camera/frame chung có SMPL hợp lệ, sau đó trung bình quan sát → UUID → scene. LiDAR gộp tia theo scene/UUID/scan trong mỗi bin. `comparison.csv` và `comparison.json` kèm số mẫu và kết quả theo scene.
-- **Phát lại.** Mặc định MP4 H.264 chất lượng CRF 16, 60 FPS, độ phân giải gốc. Mỗi khung được render lại từ mô hình, nội suy camera và pose theo thời gian. Dashboard hiển thị FPS phát lại và FPS dựng trên GPU. Kiểm nghiệm độ chính xác chỉ dùng các mốc có quan sát cảm biến thật.
+- **Phát lại.** Mặc định MP4 H.264, CRF 16 và 60 FPS. Ba view `front_left`, `front`, `front_right` chia sẻ cùng lưới timestamp từ quan sát đầu tiên đến cuối cùng. Pose cảnh dùng mốc giữa phơi sáng của camera trước làm tham chiếu, còn từng camera giữ hiệu chỉnh rolling shutter. Render lần lượt mỗi view ở độ phân giải gốc để giảm VRAM. Ba clip được ghép trái, giữa, phải vào một MP4 tối đa 3840 px ngang. Dashboard có một thanh tua chung và giữ vị trí khi chuyển xem riêng một camera. Metric độ chính xác dùng các mốc có quan sát cảm biến thật.
 
 ### Cảnh pilot đã khảo sát
 

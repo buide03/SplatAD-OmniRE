@@ -97,7 +97,17 @@ footer {padding:26px 0 12px;color:var(--muted);font-size:12px}
 .pose-monitor-grid .pose-gradient-card {grid-column:1/-1}
 #pose-history button[aria-pressed="true"] {text-decoration:underline}
 #pose-detail {overflow-wrap:anywhere}
+.replay-grid.is-triptych {grid-template-columns:minmax(0,1fr)}
+.is-triptych .metric-grid {grid-template-columns:repeat(4,minmax(0,1fr))}
+.front-labels {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;margin:0 12px 3px}
+.front-labels button {padding:9px 2px;border:none;background:#e5f3ec;color:#174c40;font-size:14px;
+  font-weight:700;cursor:pointer;border-radius:5px}
+.front-labels button:hover {background:#d2eadc}
+.front-labels button:focus-visible {outline-offset:-2px}
 @media (max-width:510px) {
   .top nav {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;height:auto}
   .top nav a {min-height:34px;justify-items:start}
+  .is-triptych .metric-grid {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .front-labels {margin-inline:8px}
+  .front-labels button {font-size:13px}
 }

@@ -188,7 +188,9 @@
     if (polling) return;
     polling = true;
     try {
-      runs = (await (await load("/api/runs")).json()).filter(run => run.mode === "pose_monitor");
+      const catalog = await (await load("/api/runs")).json();
+      window.dispatchEvent(new CustomEvent("splatad:catalog", {detail: catalog}));
+      runs = catalog.filter(run => run.mode === "pose_monitor");
       const choice = (manualRun && runs.find(run => run.path === runSelect.value))
         || runs.findLast(run => run.variant === "R2") || runs.at(-1);
       options(runSelect, runs.map(run => [run.path, `${run.scene} · ${run.variant} · ${run.run_id}`]),

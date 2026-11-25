@@ -37,13 +37,14 @@
         </div>
       </div>
 
-      <div class="replay-grid">
+      <div class="replay-grid" id="replay-grid">
         <article class="card player-card">
           <div class="card-head">
-            <div><h2>Góc nhìn camera</h2><span id="video-detail">Toàn cảnh RGB</span></div>
+            <div><h2 id="video-title">Góc nhìn camera</h2><span id="video-detail">Toàn cảnh RGB</span></div>
             <span class="pill" id="variant-label">—</span>
           </div>
-          <div class="screen">
+          <div id="front-labels" class="front-labels" aria-label="Thứ tự camera từ trái sang phải" hidden></div>
+          <div class="screen" id="video-screen">
             <video id="player" playsinline preload="metadata" muted></video>
             <div id="screen-empty" class="screen-empty">
               <h3>Chưa có video cho cấu hình này</h3><p>Video xuất từ checkpoint sẽ xuất hiện tại đây.</p>
@@ -94,7 +95,7 @@
           <div class="card-head"><div><h2>Danh sách quan sát</h2><span id="observation-count">0 quan sát</span></div></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Frame</th><th>UUID</th><th>Cự ly</th><th>PSNR</th><th>Hit LiDAR</th></tr></thead>
+              <thead><tr><th>Frame</th><th>UUID</th><th>Camera</th><th>Cự ly</th><th>PSNR</th><th>Hit LiDAR</th></tr></thead>
               <tbody id="observations-body"></tbody>
             </table>
           </div>

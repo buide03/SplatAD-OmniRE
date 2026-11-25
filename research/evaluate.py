@@ -319,6 +319,8 @@ def main():
         if any(existing[key] != record[key] for key in keys):
             parser.error("The output directory already belongs to another run")
         record["videos"] = existing["videos"]
+        if "front_triptych" in existing:
+            record["front_triptych"] = existing["front_triptych"]
     evaluate(pipeline, manifest, args.output, probes=args.probes, write_panels=not args.no_panels)
     if record["training"]:
         source = config.get_base_dir() / record["training"]

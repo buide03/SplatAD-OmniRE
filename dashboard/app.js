@@ -1,9 +1,10 @@
 const byId = (id) => document.getElementById(id);
 const player = byId("player");
 const selector = Object.fromEntries(["scene", "run", "camera", "distance", "person", "sensor", "speed"].map(id => [id, byId(id)]));
-const state = { runs: [], record: null, metrics: null, training: [], selected: null, revision: 0 };
+const state = { runs: [], record: null, metrics: null, training: [], selected: null, revision: 0,
+  playback: null, catalogLoaded: false };
 const cameraLabels = { front: "Trước", front_left: "Trước trái", front_right: "Trước phải",
-  left: "Trái", right: "Phải", back: "Sau" };
+  left: "Trái", right: "Phải", back: "Sau", front_triptych: "Ba camera trước" };
 const panels = { gt: "PandaSet GT", initial: "Mesh khởi tạo", current: "Mesh hiện tại",
   render: "SplatAD render", error: "Sai số RGB ×3" };
 
@@ -57,13 +58,26 @@ function runLabel(run, count) {
   return `${run.variant} · bước ${run.step}${count > 1 ? ` · ${run.run_id}` : ""}`;
 }
 
-function updateScene() {
+function updateScene(preferredPath) {
   const runs = state.runs.filter(run => String(run.scene) === selector.scene.value);
-  const start = runs.findLast(run => run.variant === "R2" && run.mode === "checkpoint") ?? runs.at(-1);
+  const start = runs.find(run => run.path === preferredPath)
+    ?? runs.findLast(run => run.variant === "R2" && run.mode === "checkpoint") ?? runs.at(-1);
   options(selector.run, runs.map(run => [String(state.runs.indexOf(run)), runLabel(run,
     runs.filter(other => other.variant === run.variant && other.step === run.step && other.mode === run.mode).length)]),
     start ? String(state.runs.indexOf(start)) : "", "Chưa có run");
-  void updateRun();
+  if (!state.record || JSON.stringify(start) !== JSON.stringify(state.record)) void updateRun();
+}
+
+function acceptCatalog(records) {
+  const runs = records.filter(run => run.mode !== "pose_monitor");
+  if (state.catalogLoaded && JSON.stringify(runs) === JSON.stringify(state.runs)) return;
+  const scene = selector.scene.value;
+  const path = state.record?.path;
+  state.catalogLoaded = true;
+  state.runs = runs;
+  options(selector.scene, [...new Set(runs.map(run => String(run.scene)))].map(id => [id, id]),
+    scene, "Chưa có cảnh");
+  updateScene(path);
 }
 
 async function updateRun() {
@@ -73,8 +87,7 @@ async function updateRun() {
   state.metrics = null;
   state.training = [];
   state.selected = null;
-  options(selector.camera, (state.record?.videos ?? []).map(v =>
-    [v.camera, cameraLabels[v.camera] ?? v.camera]), oldCamera, "Chưa có camera");
+  setCameraOptions(state.record?.front_triptych?.camera ?? oldCamera);
   syncHeader();
   updateCamera();
   plot();
@@ -88,9 +101,7 @@ async function updateRun() {
   if (revision !== state.revision) return;
   state.metrics = metrics.status === "fulfilled" ? metrics.value : null;
   state.training = training.status === "fulfilled" ? training.value : [];
-  const cameras = new Set([...record.videos.map(v => v.camera), ...(state.metrics?.observations ?? []).map(r => r.camera)]);
-  const preferred = selector.camera.value || oldCamera;
-  options(selector.camera, [...cameras].map(camera => [camera, cameraLabels[camera] ?? camera]), preferred, "Chưa có camera");
+  setCameraOptions(selector.camera.value || oldCamera);
   updateCamera();
   if (metrics.status === "rejected") byId("metric-note").textContent = "Không đọc được tệp metric của cấu hình này.";
   plot();
@@ -100,14 +111,34 @@ function syncHeader() {
   const run = state.record;
   byId("scene-title").textContent = run ? `Cảnh ${run.scene}` : "Phát lại cảnh";
   byId("context").textContent = run?.mode === "source"
-    ? "Video camera gốc và quan sát từ nhãn cuboid PandaSet."
+    ? "Video camera gốc từ PandaSet."
     : run ? "Toàn cảnh RGB và đánh giá người đi bộ theo UUID, camera và cự ly."
     : "Thư mục hiện tại chưa có video hoặc kết quả đánh giá.";
   byId("variant-label").textContent = run ? runLabel(run, 1) : "Chưa có cấu hình";
 }
 
+function setCameraOptions(preferred) {
+  const run = state.record;
+  const cameras = new Set([
+    ...(run?.front_triptych ? [run.front_triptych.camera] : []),
+    ...(run?.videos ?? []).map(video => video.camera),
+    ...(state.metrics?.observations ?? []).map(row => row.camera),
+  ]);
+  options(selector.camera, [...cameras].map(name => [name, cameraLabels[name] ?? name]), preferred, "Chưa có camera");
+}
+
 function selectedVideo() {
+  if (state.record?.front_triptych?.camera === selector.camera.value) return state.record.front_triptych;
   return state.record?.videos.find(item => item.camera === selector.camera.value);
+}
+
+function cameraInView(camera) {
+  return selectedVideo()?.cameras?.includes(camera) ?? camera === selector.camera.value;
+}
+
+function timeForObservation(row) {
+  const video = selectedVideo();
+  return video?.frame_times_by_camera?.[row.camera]?.[row.frame] ?? video?.frame_times?.[row.frame];
 }
 
 function syncTransport() {
@@ -124,19 +155,50 @@ function updateCamera() {
   const video = selectedVideo();
   const url = video ? artifact(video.file) : "";
   if (player.getAttribute("src") !== (url || null)) {
+    const previous = state.playback;
+    const sharedTimeline = video && previous?.path === state.record.path
+      && Number.isFinite(video.timeline_start_s) && video.timeline_start_s === previous.video.timeline_start_s
+      && video.duration_s === previous.video.duration_s;
+    const position = sharedTimeline ? player.currentTime : 0;
+    const resume = sharedTimeline && !player.paused;
     player.pause();
+    if (sharedTimeline) {
+      player.addEventListener("loadedmetadata", () => {
+        if (player.getAttribute("src") !== url) return;
+        player.currentTime = Math.min(position, player.duration);
+        if (resume) void player.play().catch(() => {});
+      }, {once: true});
+    }
     if (url) player.src = url;
     else player.removeAttribute("src");
     player.load();
     player.playbackRate = Number(selector.speed.value);
   }
+  state.playback = video ? {video, path: state.record.path} : null;
   if (video?.poster) player.poster = artifact(video.poster);
   else player.removeAttribute("poster");
   byId("screen-empty").hidden = Boolean(video);
   player.hidden = !video;
   for (const id of ["play", "seek", "speed"]) byId(id).disabled = !video;
-  byId("camera-label").textContent = video ? video.camera.toUpperCase() : "";
-  byId("video-detail").textContent = video ? `${video.width} × ${video.height} · ${video.fps} FPS` : "Toàn cảnh RGB";
+  const views = video?.cameras ?? [];
+  const group = views.length > 1;
+  byId("replay-grid").classList.toggle("is-triptych", group);
+  byId("video-screen").style.aspectRatio = group ? `${video.width} / ${video.height}` : "";
+  const labels = byId("front-labels");
+  labels.hidden = !group;
+  labels.replaceChildren(...views.map(name => {
+    const button = element("button", cameraLabels[name] ?? name);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      selector.camera.value = name;
+      updateCamera();
+    });
+    return button;
+  }));
+  byId("camera-label").textContent = video && !group ? video.camera.toUpperCase() : "";
+  byId("video-title").textContent = group ? "Ba camera trước đồng bộ" : "Góc nhìn camera";
+  byId("video-detail").textContent = video
+    ? `${video.width} × ${video.height} · ${video.fps} FPS${group ? " · toàn bộ scene" : ""}` : "Toàn cảnh RGB";
   syncTransport();
   const people = [...new Set(cameraRows().map(r => r.uuid))];
   options(selector.person, [["all", "Tất cả"], ...people.map(p => [p, p.slice(0, 13)])], selector.person.value);
@@ -144,7 +206,7 @@ function updateCamera() {
 }
 
 function cameraRows() {
-  return (state.metrics?.observations ?? []).filter(row => row.camera === selector.camera.value);
+  return (state.metrics?.observations ?? []).filter(row => cameraInView(row.camera));
 }
 
 function filteredRows() {
@@ -161,7 +223,7 @@ function filterRows() {
   if (!rows.length) {
     const row = table.insertRow();
     const cell = row.insertCell();
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     cell.className = "empty-cell";
     cell.textContent = "Chưa có quan sát phù hợp.";
   }
@@ -179,6 +241,7 @@ function filterRows() {
     tr.insertCell().append(button);
     tr.insertCell().textContent = row.uuid.slice(0, 8);
     tr.cells[1].title = row.uuid;
+    tr.insertCell().textContent = cameraLabels[row.camera] ?? row.camera;
     tr.insertCell().textContent = `${decimal(row.distance_m, 1)} m`;
     tr.insertCell().textContent = decimal(row.psnr_db, 2);
     tr.insertCell().textContent = decimal(row.lidar_hits ?? row.raw_lidar_hits, 0);
@@ -194,7 +257,7 @@ function mean(rows, key) {
 
 function showMetrics(rows) {
   const full = selector.person.value === "all" && selector.distance.value === "all";
-  const rgb = full ? (state.metrics?.scene_metrics ?? []).filter(row => row.camera === selector.camera.value) : rows;
+  const rgb = full ? (state.metrics?.scene_metrics ?? []).filter(row => cameraInView(row.camera)) : rows;
   byId("metric-scope").textContent = full ? "RGB toàn ảnh · LiDAR vùng người" : "RGB crop · LiDAR vùng người";
   const uniqueScans = [...new Map(rows.map(row => [`${row.uuid}/${row.scan}`, row])).values()];
   const container = byId("scalars");
@@ -212,7 +275,8 @@ function showMetrics(rows) {
   const stats = byId("playback-stats");
   stats.replaceChildren();
   stat(stats, "FPS phát lại", video ? `${video.fps} FPS` : "—");
-  stat(stats, "FPS render trên GPU", Number.isFinite(video?.render_fps) ? `${decimal(video.render_fps, 1)} FPS` : "—");
+  stat(stats, video?.cameras ? "Bộ ba render mỗi giây trên GPU" : "FPS render trên GPU",
+    Number.isFinite(video?.render_fps) ? `${decimal(video.render_fps, 1)} FPS` : "—");
   stat(stats, "Hit LiDAR ∑", uniqueScans.length
     ? decimal(uniqueScans.reduce((sum, row) => sum + (row.lidar_hits ?? row.raw_lidar_hits ?? 0), 0), 0) : "—");
   if (state.record?.run_stats?.peak_vram_mib) stat(stats, "Peak VRAM", `${decimal(state.record.run_stats.peak_vram_mib / 1024, 2)} GiB`);
@@ -232,9 +296,9 @@ function showEvidence() {
   const row = state.selected;
   const container = byId("panels");
   container.replaceChildren();
-  byId("jump").disabled = !row || selectedVideo()?.frame_times[String(row.frame)] === undefined;
+  byId("jump").disabled = !row || !Number.isFinite(timeForObservation(row));
   byId("evidence-detail").textContent = row
-    ? `Frame ${row.frame} · ${decimal(row.distance_m, 1)} m · bbox ${row.bbox_height_px} px · ${row.smpl_valid ? "Có SMPL" : "Chưa có pose SMPL"}`
+    ? `${cameraLabels[row.camera] ?? row.camera} · Frame ${row.frame} · ${decimal(row.distance_m, 1)} m · bbox ${row.bbox_height_px} px · ${row.smpl_valid ? "Có SMPL" : "Chưa có pose SMPL"}`
     : "Chọn một quan sát trong bảng";
   const entries = Object.entries(panels).filter(([key]) => row?.panels?.[key]).map(([key, label]) => [row.panels[key], label, ""]);
   if (row?.lidar_panel) entries.push([row.lidar_panel, "Range LiDAR và sai số", "wide"]);
@@ -304,7 +368,7 @@ function plot() {
   if (maxStep !== minStep) ctx.fillText(String(maxStep), width - 10 - ctx.measureText(String(maxStep)).width, height - 8);
 }
 
-selector.scene.addEventListener("change", updateScene);
+selector.scene.addEventListener("change", () => updateScene());
 selector.run.addEventListener("change", updateRun);
 selector.camera.addEventListener("change", updateCamera);
 selector.person.addEventListener("change", filterRows);
@@ -319,7 +383,7 @@ byId("play").addEventListener("click", async () => {
 byId("seek").addEventListener("input", e => { player.currentTime = Number(e.target.value); });
 byId("jump").addEventListener("click", () => {
   player.pause();
-  player.currentTime = selectedVideo().frame_times[String(state.selected.frame)];
+  player.currentTime = timeForObservation(state.selected);
   byId("replay").scrollIntoView();
 });
 player.addEventListener("error", () => {
@@ -329,6 +393,7 @@ for (const event of ["loadedmetadata", "timeupdate", "play", "pause", "ended", "
   player.addEventListener(event, syncTransport);
 }
 window.addEventListener("resize", plot);
+window.addEventListener("splatad:catalog", event => acceptCatalog(event.detail));
 for (const anchor of document.querySelectorAll("nav a")) {
   anchor.addEventListener("click", () => {
     document.querySelector("nav a.active")?.classList.remove("active");
@@ -337,9 +402,7 @@ for (const anchor of document.querySelectorAll("nav a")) {
 }
 (async function init() {
   try {
-    state.runs = (await (await load("/api/runs")).json()).filter(run => run.mode !== "pose_monitor");
-    options(selector.scene, [...new Set(state.runs.map(r => String(r.scene)))].map(s => [s, s]), "", "Chưa có cảnh");
-    updateScene();
+    acceptCatalog(await (await load("/api/runs")).json());
   } catch {
     byId("context").textContent = "Không kết nối được máy chủ dashboard.";
   }

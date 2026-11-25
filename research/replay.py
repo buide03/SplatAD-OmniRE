@@ -1,7 +1,5 @@
 """Render the complete scene at interpolated sensor poses and encode browser-ready MP4."""
 import argparse
-import math
-import subprocess
 from bisect import bisect_right
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +10,7 @@ import torch
 from .evaluate import camera_indices, camera_sample, load_checkpoint, run_record, to_image
 from .geometry import matrix_quat, quat_matrix, slerp
 from .prepare import dump_json, read_json, sha256
-from .source_preview import ffmpeg_executable
+from .sync_video import FRONT_CAMERAS, Timeline, combine_front, ffmpeg_executable, write_video
 
 
 def camera_between(a, b, time, alpha):
@@ -27,70 +25,66 @@ def camera_between(a, b, time, alpha):
                    times=a.times.new_full(a.times.shape, time), metadata=metadata)
 
 
-def open_encoder(ffmpeg, path, width, height, fps, crf):
-    return subprocess.Popen([
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo",
-        "-pix_fmt", "rgb24", "-video_size", f"{width}x{height}", "-framerate", str(fps), "-i", "-",
-        "-an", "-c:v", "libx264", "-preset", "fast", "-crf", str(crf), "-pix_fmt", "yuv420p",
-        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-movflags", "+faststart", str(path),
-    ], stdin=subprocess.PIPE)
+def camera_track(manager, camera_name, indices):
+    samples = sorted((frame, index) for (name, frame), index in indices.items() if name == camera_name)
+    if len(samples) < 2:
+        raise ValueError(f"At least two source frames are required for {camera_name}")
+    views = [camera_sample(manager, index, with_image=False)[0] for _, index in samples]
+    return [frame for frame, _ in samples], views, [float(camera.times.item()) for camera in views]
+
+
+def camera_center_offset(model, camera):
+    """Match SplatAD's RGB capture-time correction without changing camera geometry."""
+    if not model.config.compensate_rs_camera or camera.metadata is None:
+        return camera.times.new_zeros(())
+    offset = camera.metadata.get("time_to_center_pixel", camera.times.new_zeros(()))
+    return (offset + model.camera_velocity_optimizer.get_time_to_center_pixel_adjustment(camera)).reshape(())
 
 
 @torch.inference_mode()
-def render_camera(pipeline, camera_name, output, fps, scale, crf, ffmpeg):
-    manager, model = pipeline.datamanager, pipeline.model
-    frame_indices = sorted((f, index) for (camera, f), index in camera_indices(manager).items() if camera == camera_name)
-    if len(frame_indices) < 2:
-        raise ValueError(f"At least two source frames are required for {camera_name}")
-    views = [camera_sample(manager, index, with_image=False)[0] for _, index in frame_indices]
-    times = [float(camera.times.item()) for camera in views]
-    if any(a >= b for a, b in zip(times, times[1:])):
-        raise ValueError(f"Source camera timestamps are not increasing for {camera_name}")
-    frame_count = math.floor((times[-1] - times[0]) * fps + 1e-5) + 1
+def render_camera(model, camera_name, track, output, timeline, scale, crf, ffmpeg, center_offset=None):
+    frames, views, times = track
     for view in views:
         if scale != 1:
             view.rescale_output_resolution(scale)
     width, height = int(views[0].width.item()), int(views[0].height.item())
     path = output / f"{camera_name}.mp4"
-    temporary = output / f"{camera_name}.partial.mp4"
     elapsed_gpu = 0.0
-    timeline = {}
     mark, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     # Warm lazy kernels and allocate render buffers before timing the sequence.
     model.get_camera_outputs(views[0])
     torch.cuda.synchronize()
     started = perf_counter()
-    encoder = open_encoder(ffmpeg, temporary, width, height, fps, crf)
-    try:
-        for n in range(frame_count):
-            time = times[0] + n / fps
-            left = min(bisect_right(times, time) - 1, len(times) - 2)
-            alpha = min(1.0, (time - times[left]) / (times[left + 1] - times[left]))
+
+    def images():
+        nonlocal elapsed_gpu
+        for time in timeline.times():
+            left = min(max(0, bisect_right(times, time) - 1), len(times) - 2)
+            # At a camera's staggered endpoints, hold its pose while the scene clock continues.
+            alpha = min(1.0, max(0.0, (time - times[left]) / (times[left + 1] - times[left])))
             mark.record()
             camera = camera_between(views[left], views[left + 1], time, views[left].times.new_tensor(alpha))
+            if center_offset is not None:
+                # The renderer adds its own offset to camera.times. Compensate the
+                # input time so all views query the same scene at the front-camera center.
+                camera.times = camera.times + center_offset - camera_center_offset(model, camera)
             rgb = model.get_camera_outputs(camera)["rgb"]
             end.record()
             image = to_image(rgb)
             end.synchronize()
             elapsed_gpu += mark.elapsed_time(end) / 1000
-            encoder.stdin.write(image.tobytes())
-        encoder.stdin.close()
-        if encoder.wait() != 0:
-            raise RuntimeError(f"ffmpeg could not encode {camera_name}")
-        temporary.replace(path)
-    finally:
-        if encoder.poll() is None:
-            encoder.kill()
-            encoder.wait()
-        temporary.unlink(missing_ok=True)
-    for (frame, _), time in zip(frame_indices, times, strict=True):
-        timeline[str(frame)] = round(time - times[0], 6)
+            yield image
+
+    frame_count = write_video(ffmpeg, path, images(), width, height, timeline.fps, crf)
+    if frame_count != timeline.frames:
+        raise RuntimeError(f"Incomplete replay for {camera_name}")
     return {
-        "camera": camera_name, "file": path.name, "fps": fps, "frames": frame_count,
-        "width": width + width % 2, "height": height + height % 2, "duration_s": frame_count / fps,
+        **timeline.video_metadata(path, width + width % 2, height + height % 2),
+        "camera": camera_name,
         "render_fps": frame_count / max(elapsed_gpu, 1e-6),
         "export_fps": frame_count / max(perf_counter() - started, 1e-6),
-        "source_fps": (len(times) - 1) / (times[-1] - times[0]), "frame_times": timeline,
+        "source_fps": (len(times) - 1) / (times[-1] - times[0]),
+        "frame_times": timeline.frame_times(frames, times),
     }
 
 
@@ -127,15 +121,30 @@ def main():
         record["metrics"] = None
     if not (args.output / "training.jsonl").exists():
         record["training"] = None
-    cameras = args.cameras or list(config.pipeline.datamanager.dataparser.cameras)
+    cameras = list(dict.fromkeys(args.cameras or list(config.pipeline.datamanager.dataparser.cameras)))
+    indices = camera_indices(pipeline.datamanager)
+    tracks = {camera: camera_track(pipeline.datamanager, camera, indices) for camera in cameras}
+    synchronized = all(name in tracks for name in FRONT_CAMERAS)
+    front_clock = Timeline.from_tracks([tracks[name][2] for name in FRONT_CAMERAS], args.fps) if synchronized else None
+    with torch.inference_mode():
+        center_offset = camera_center_offset(pipeline.model, tracks["front"][1][0]) if synchronized else None
+    if any(name in FRONT_CAMERAS for name in cameras) and record.pop("front_triptych", None):
+        dump_json(metadata_path, record)
     videos = {v["camera"]: v for v in record["videos"]}
-    for camera in dict.fromkeys(cameras):
-        videos[camera] = render_camera(pipeline, camera, args.output, args.fps, args.scale, args.crf, ffmpeg)
+    for camera in cameras:
+        front_view = synchronized and camera in FRONT_CAMERAS
+        clock = front_clock if front_view else Timeline.from_tracks([tracks[camera][2]], args.fps)
+        videos[camera] = render_camera(pipeline.model, camera, tracks[camera], args.output, clock,
+                                       args.scale, args.crf, ffmpeg, center_offset if front_view else None)
         record["videos"] = list(videos.values())
         dump_json(metadata_path, record)
         stats = videos[camera]
         print(f"{camera}: {stats['fps']} FPS playback, {stats['render_fps']:.1f} FPS GPU render, "
               f"{stats['export_fps']:.1f} FPS including encoding", flush=True)
+    if synchronized:
+        record["front_triptych"] = combine_front(ffmpeg, args.output, videos, args.crf)
+        dump_json(metadata_path, record)
+        print(f"Three synchronized views: {args.output / record['front_triptych']['file']}", flush=True)
 
 
 if __name__ == "__main__":
