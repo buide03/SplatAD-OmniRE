@@ -113,10 +113,11 @@ def main():
         parser.error("The selected manifest differs from the one used in training")
     args.output.mkdir(parents=True, exist_ok=True)
     metadata_path = args.output / "run.json"
-    candidate = run_record(config, checkpoint, step, manifest_path, mode)
+    candidate = run_record(config, checkpoint, step, manifest_path, read_json(manifest_path), mode)
     record = read_json(metadata_path) if metadata_path.exists() else candidate
     if any(record[key] != candidate[key] for key in ("scene", "variant", "run_id", "step", "mode", "manifest_sha256")):
         parser.error("The output directory already belongs to another run")
+    record["pose_summary"] = candidate["pose_summary"]
     if not (args.output / "metrics.json").exists():
         record["metrics"] = None
     if not (args.output / "training.jsonl").exists():

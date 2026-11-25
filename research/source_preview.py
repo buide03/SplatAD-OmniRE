@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .prepare import camera_at, dump_json, read_json, sha256, validate_tracks
+from .prepare import camera_at, dump_json, front_pose_summary, read_json, sha256, validate_tracks
 from .sync_video import FRONT_CAMERAS, Timeline, combine_front, ffmpeg_executable, write_video
 
 
@@ -151,6 +151,7 @@ def main():
     record = {
         "scene": scene, "variant": "GT", "mode": "source", "step": None, "run_id": "source",
         "manifest_sha256": sha256(args.manifest) if manifest else None,
+        "pose_summary": front_pose_summary(manifest) if manifest else None,
         "metrics": "metrics.json" if manifest else None, "training": None,
         "smpl_version": version, "videos": list(videos.values()),
     }

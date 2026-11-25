@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .evaluate import camera_indices, camera_sample, crop_bounds, overlay, project, reprojection, to_image
-from .prepare import dump_json, read_json
+from .prepare import dump_json, front_pose_summary, read_json
 
 POSE_ATTRS = ("translation", "root", "body")
 
@@ -225,7 +225,8 @@ class PoseMonitor:
         self.manager = pipeline.datamanager
         self.output = Path(output)
         self.record = {"scene": manifest["scene_id"], "variant": self.model.config.variant,
-                       "mode": "pose_monitor", "run_id": run_id, "videos": [], "monitor": "monitor.json"}
+                       "mode": "pose_monitor", "run_id": run_id, "videos": [], "monitor": "monitor.json",
+                       "pose_summary": front_pose_summary(manifest)}
         cameras = camera_indices(self.manager)
         rows = select_observations(manifest, self.model, cameras)
         self.observations = {

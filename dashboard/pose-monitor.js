@@ -1,30 +1,39 @@
 (() => {
-  const runSelect = byId("pose-run");
-  const observationSelect = byId("pose-observation");
-  const container = byId("pose-results");
+  const observation = byId("pose-observation");
+  const results = byId("pose-results");
   const status = byId("pose-status");
-  const panelLabels = {
-    reference: "RGB gốc · viền xanh là nhãn", initial: "Mesh khởi tạo",
-    current: "Mesh tại bước train", render: "RGB render",
-    error: "Sai số RGB ×3", after_probe: "Mesh sau probe", render_after_probe: "RGB sau probe",
-  };
-  const groupLabels = { translation: "Tịnh tiến gốc", root: "Xoay gốc", body: "Xoay khớp" };
+  const panelLabels = {reference: "RGB gốc", initial: "Mesh khởi tạo", current: "Mesh hiệu chỉnh"};
+  const groupLabels = {translation: "Tịnh tiến gốc", root: "Xoay gốc", body: "Xoay khớp"};
   const probeMessages = {
-    frozen: "Pose cố định trong cấu hình này.",
-    pose_unavailable: "Pose nằm ngoài đoạn track hợp lệ tại mốc train RGB.",
-    non_finite_loss: "Loss RGB có giá trị bất thường.",
-    non_finite_gradient: "Gradient pose có NaN hoặc Inf.",
-    no_pose_gradient: "Chưa có gradient pose hữu hạn khác 0 ở frame này.",
-    measured: "Một bước Adam tạm thời, sau đó khôi phục pose.",
+    frozen: "Pose cố định.",
+    pose_unavailable: "Frame nằm ngoài đoạn pose hợp lệ.",
+    non_finite_loss: "Loss RGB không hữu hạn.",
+    non_finite_gradient: "Gradient không hữu hạn.",
+    no_pose_gradient: "Gradient pose bằng 0 hoặc chưa có.",
   };
-  let runs = [];
-  let record = null;
-  let data = null;
-  let step = null;
+  let record;
+  let data;
+  let step;
+  let selectionKey;
   let revision = 0;
-  let snapshotKey = null;
-  let manualRun = false;
-  let polling = false;
+
+  function metrics(container, values) {
+    container.hidden = !values.length;
+    container.replaceChildren(...values.map(([label, value, title]) => {
+      const item = element("div");
+      item.append(element("dt", label), element("dd", value));
+      if (title) item.title = title;
+      return item;
+    }));
+  }
+
+  function drawExtraction(summary) {
+    metrics(byId("pose-extraction"), summary?.tracks ? [
+      ["Track SMPL", decimal(summary.tracks, 0), "Track SMPL được chọn và xuất hiện ở ba camera trước"],
+      ["Pose trực tiếp", decimal(summary.direct_frames, 0), "Số cặp người–frame có pose 4D-Humans, gộp ba camera"],
+      ["Pose nội suy", decimal(summary.completed_frames, 0), "Số cặp người–frame được OmniRe hoàn thiện pose"],
+    ] : []);
+  }
 
   function row(container, cells) {
     const entry = container.insertRow();
@@ -40,79 +49,26 @@
     return Number.isFinite(value) ? `${decimal(value, 2)} px` : "—";
   }
 
-  function delta(a, b, digits) {
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return "—";
-    const difference = b - a;
-    return `${difference > 0 ? "+" : ""}${decimal(difference, digits)}`;
+  function note(id, message) {
+    const node = byId(id);
+    node.textContent = message || "";
+    node.hidden = !message;
   }
 
   function gradient(value) {
-    if (value?.state === "finite") return value.norm.toExponential(2);
-    return { none: "Thiếu", zero: "0", non_finite: "NaN/Inf" }[value?.state] ?? "—";
+    return Number.isFinite(value?.norm) ? value.norm.toExponential(2) :
+      value?.state === "non_finite" ? "NaN/Inf" : "—";
   }
 
   function displacement(value) {
-    return Number.isFinite(value?.max)
-      ? `${decimal(value.max, 3)} ${value.unit === "deg" ? "°" : value.unit}` : "—";
+    return Number.isFinite(value?.max) ? `${decimal(value.max, 3)} ${value.unit === "deg" ? "°" : value.unit}` : "—";
   }
 
-  function draw() {
-    const key = observationSelect.value;
-    const reference = data?.observations[key];
-    const series = (data?.steps ?? []).filter(entry => entry.results[key]);
-    const current = series.find(entry => entry.step === step) ?? series.at(-1);
-    container.hidden = !current;
-    if (!current) return;
-    step = current.step;
-    const active = current.results[key];
-    const baseline = series[0].results[key].metrics;
-    const metrics = active.metrics;
-    const probe = active.pose_only_rgb_probe;
-    const after = probe.after ?? {};
-    const actual = active.actual_rgb_step;
-    status.textContent = `Các mốc theo dõi cập nhật tự động · ${series.length} mốc`;
-    byId("pose-detail").textContent = `Bước ${step} · ${reference.camera} · frame ${reference.frame} · ${reference.uuid}`;
-    const roiName = metrics.roi_source === "manual_silhouette" ? "Mask người vẽ tay" : "BBox RGB cố định";
-    const initialIoU = Number.isFinite(metrics.silhouette_initial_iou)
-      ? ` · IoU khởi tạo ${decimal(metrics.silhouette_initial_iou, 3)}` : "";
-    const counts = metrics.keypoint_count ? ` · ${metrics.keypoint_count} điểm GT` : "";
-    const occlusion = reference.limbs_visible === false && metrics.roi_source === "fixed_bbox_crop"
-      ? " · Chi bị che, vùng RGB gồm cả vật che" : "";
-    byId("pose-roi").textContent = `${roiName} · ${decimal(metrics.roi_pixels, 0)} px${initialIoU}${counts}${occlusion}`;
-    let probeDetail = probeMessages[probe.status] ?? "Đang chờ probe.";
-    if (probe.status === "measured" && Number.isFinite(metrics.silhouette_iou) &&
-        Number.isFinite(after.silhouette_iou)) {
-      const change = after.silhouette_iou - metrics.silhouette_iou;
-      probeDetail += change > 0.0005 ? " IoU tăng sau bước thử."
-        : change < -0.0005 ? " IoU giảm sau bước thử." : " IoU thay đổi dưới 0,001.";
-    } else if (probe.status === "measured" && !metrics.keypoint_count) {
-      probeDetail += " Xem overlay để nhận xét độ khớp mesh.";
-    }
-    byId("pose-probe-detail").textContent = probeDetail;
-    byId("pose-gradient-detail").textContent = actual
-      ? `Train RGB bước ${actual.step} · cùng camera, frame và UUID · loss toàn cảnh ${decimal(actual.scene_loss, 5)}`
-      : "Chưa có bước train RGB lấy đúng quan sát này.";
-
-    const gallery = byId("pose-panels");
-    gallery.replaceChildren();
-    for (const [name, label] of Object.entries(panelLabels)) {
-      const path = active.panels[name];
-      if (!path) continue;
-      const caption = name === "reference" && metrics.roi_source !== "manual_silhouette" && !metrics.keypoint_count
-        ? "RGB gốc" : label;
-      const figure = element("figure");
-      const img = element("img");
-      img.src = artifact(path, record);
-      img.alt = caption;
-      img.loading = "lazy";
-      figure.append(img, element("figcaption", caption));
-      gallery.append(figure);
-    }
-
+  function drawHistory(series, key) {
     const timeline = byId("pose-history");
     timeline.replaceChildren();
     for (const entry of series) {
-      const sample = entry.results[key].metrics;
+      const values = entry.results[key].metrics;
       const button = element("button", String(entry.step), "table-select");
       button.type = "button";
       button.setAttribute("aria-pressed", String(entry.step === step));
@@ -121,95 +77,127 @@
         draw();
         timeline.querySelector("tr.selected button")?.focus();
       });
-      const activeRow = row(timeline, [button, decimal(sample.rgb_mae, 5),
-        decimal(sample.silhouette_iou, 3), px(sample.reprojection_mae_px)]);
-      activeRow.classList.toggle("selected", entry.step === step);
+      row(timeline, [button, decimal(values.rgb_mae, 5), decimal(values.silhouette_iou, 3),
+        px(values.reprojection_mae_px)]).classList.toggle("selected", entry.step === step);
     }
-    if (series.length > 1) {
-      row(timeline, ["Δ từ mốc đầu", delta(baseline.rgb_mae, metrics.rgb_mae, 5),
-        delta(baseline.silhouette_iou, metrics.silhouette_iou, 3),
-        delta(baseline.reprojection_mae_px, metrics.reprojection_mae_px, 2)]);
-    }
+  }
 
-    const differences = byId("pose-probe");
-    differences.replaceChildren();
-    for (const [label, before, next, digits] of [
-      ["Loss RGB toàn cảnh ↓", probe.loss_before, probe.loss_after, 5],
-      ["RGB MAE vùng người ↓", metrics.rgb_mae, after.rgb_mae, 5],
-      ["IoU mesh ↑", metrics.silhouette_iou, after.silhouette_iou, 3],
-      ["Lỗi điểm chiếu ↓ (px)", metrics.reprojection_mae_px, after.reprojection_mae_px, 2],
-    ]) {
-      row(differences, [label, decimal(before, digits), decimal(next, digits), delta(before, next, digits)]);
+  function drawProbe(active) {
+    const values = active.metrics;
+    const probe = active.pose_only_rgb_probe ?? {};
+    const after = probe.after ?? {};
+    const actual = active.actual_rgb_step;
+    note("pose-probe-detail", probe.status === "measured" ? "Bước thử được hoàn tác sau khi đo." :
+      probeMessages[probe.status] ?? "Chưa có bước thử.");
+    const comparisons = [
+      ["Loss RGB toàn cảnh", probe.loss_before, probe.loss_after, 5],
+      ["RGB MAE vùng người", values.rgb_mae, after.rgb_mae, 5],
+      ["IoU mesh", values.silhouette_iou, after.silhouette_iou, 3],
+      ["Lỗi điểm chiếu (px)", values.reprojection_mae_px, after.reprojection_mae_px, 2],
+    ].filter(([, before, next]) => Number.isFinite(before) && Number.isFinite(next));
+    const table = byId("pose-probe");
+    table.replaceChildren();
+    for (const [label, before, next, digits] of comparisons) {
+      row(table, [label, decimal(before, digits), decimal(next, digits)]);
     }
+    byId("pose-probe-table").hidden = !comparisons.length;
 
     const gradients = byId("pose-gradients");
     gradients.replaceChildren();
+    const hasGradients = Boolean(probe.groups || actual?.groups);
+    byId("pose-gradient-card").hidden = !hasGradients;
+    if (!hasGradients) return;
+    note("pose-gradient-detail", actual ? `Cập nhật train tại bước ${actual.step}.` : "Đang đợi batch RGB lấy đúng frame.");
     for (const [key, label] of Object.entries(groupLabels)) {
-      const temporary = probe.groups?.[key];
-      const observed = actual?.groups[key];
-      row(gradients, [label, gradient(temporary), displacement(temporary?.delta),
+      const trial = probe.groups?.[key];
+      const observed = actual?.groups?.[key];
+      row(gradients, [label, gradient(trial), displacement(trial?.delta),
         gradient(observed?.gradient), displacement(observed?.step_delta)]);
     }
   }
 
-  async function showRun(chosen) {
-    const next = chosen ? `${chosen.path}/${chosen.step}/${chosen.snapshots}` : "";
-    if (next === snapshotKey) return;
-    const update = ++revision;
-    const keepStep = chosen?.path === record?.path;
-    const oldObservation = keepStep ? observationSelect.value : "";
-    const wasLatest = step === data?.steps.at(-1)?.step;
-    if (!keepStep) {
-      container.hidden = true;
-      step = null;
+  function draw() {
+    const key = observation.value;
+    const reference = data?.observations[key];
+    const series = (data?.steps ?? []).filter(entry => entry.results[key]);
+    const current = series.find(entry => entry.step === step) ?? series.at(-1);
+    results.hidden = !current;
+    observation.hidden = !current || observation.options.length < 2;
+    note("pose-status", current ? "" : record ? "Đang đợi mốc hiệu chỉnh SMPL." : "Chưa có dữ liệu hiệu chỉnh SMPL.");
+    if (!current) return;
+    step = current.step;
+    const active = current.results[key];
+    const values = active.metrics;
+    const measuredOnMask = values.roi_source === "manual_silhouette";
+    byId("pose-detail").textContent =
+      `${cameraLabels[reference.camera]} · Frame ${reference.frame} · Bước ${step}`;
+    const gallery = byId("pose-panels");
+    gallery.replaceChildren();
+    for (const [name, label] of Object.entries(panelLabels)) {
+      const path = active.panels?.[name];
+      if (!path) continue;
+      const figure = element("figure");
+      const image = element("img");
+      image.src = artifact(path, record);
+      image.alt = label;
+      image.loading = "lazy";
+      figure.append(image, element("figcaption", label));
+      gallery.append(figure);
     }
+    const fit = [];
+    if (Number.isFinite(values.silhouette_iou)) {
+      fit.push(["IoU mesh ↑", decimal(values.silhouette_iou, 3), "Độ phủ giữa mesh chiếu và mask người vẽ tay"]);
+    }
+    if (Number.isFinite(values.reprojection_mae_px)) {
+      fit.push(["Lỗi điểm chiếu ↓", px(values.reprojection_mae_px), "Sai số pixel trên các điểm có nhãn"]);
+    }
+    if (Number.isFinite(values.rgb_mae)) {
+      fit.push(["RGB MAE vùng người ↓", decimal(values.rgb_mae, 5), measuredOnMask ? "Đo trên mask người" : "Đo trên bbox cố định"]);
+    }
+    metrics(byId("pose-fit"), fit);
+    note("pose-roi", reference.limbs_visible === false && !measuredOnMask ? "Vùng RGB gồm cả vật che." : "");
+    drawHistory(series, key);
+    drawProbe(active);
+  }
+
+  async function update(event) {
+    const {source, render, monitors} = event.detail;
+    const eligible = render ? monitors.filter(run => run.run_id === render.run_id && run.variant === render.variant) : monitors;
+    const chosen = eligible.findLast(run => run.variant === "R2") ?? eligible.at(-1);
+    drawExtraction(render?.variant === "R0" ? null : render?.pose_summary ?? chosen?.pose_summary ?? source?.pose_summary);
+    const next = chosen ? `${chosen.path}/${chosen.step}/${chosen.snapshots}` : "";
+    if (selectionKey === next) return;
+    selectionKey = next;
+    const updateIndex = ++revision;
+    const sameRun = record?.path === chosen?.path;
+    const formerObservation = sameRun ? observation.value : null;
+    const followLatest = !sameRun || step === data?.steps.at(-1)?.step;
     record = chosen;
-    if (!record) {
+    if (!sameRun) {
       data = null;
-      snapshotKey = next;
-      options(observationSelect, [], "", "Chưa có quan sát");
-      status.textContent = "Chưa có monitor SMPL. Dữ liệu xuất hiện khi Colab chạy R1 hoặc R2.";
+      step = null;
+      draw();
+    }
+    if (!record) {
+      draw();
       return;
     }
     try {
-      const report = await (await load(artifact(record.monitor, record))).json();
-      if (update !== revision) return;
+      const report = await loadJson(artifact(chosen.monitor, chosen));
+      if (updateIndex !== revision) return;
       data = report;
-      snapshotKey = next;
-      if (wasLatest || step === null) step = data.steps.at(-1)?.step ?? null;
-      options(observationSelect, Object.entries(data.observations).map(([key, ref]) =>
-        [key, `${ref.camera} · ${ref.frame} · ${ref.uuid.slice(0, 8)}`]), oldObservation, "Chưa có quan sát");
-      status.textContent = "Đang chờ mốc đầu tiên từ Colab.";
+      if (followLatest || step == null) step = data.steps.at(-1)?.step;
+      const entries = Object.entries(data.observations).filter(([, ref]) => ref.camera in cameraLabels)
+        .map(([key, ref]) => [key, `${cameraLabels[ref.camera]} · Frame ${ref.frame} · ${ref.uuid.slice(0, 8)}`]);
+      options(observation, entries, formerObservation, "Chưa có quan sát");
       draw();
     } catch {
-      if (update === revision) status.textContent = "Chưa đọc được dữ liệu monitor. Sẽ thử lại.";
+      if (updateIndex !== revision) return;
+      selectionKey = undefined;
+      note("pose-status", "Chưa đọc được dữ liệu hiệu chỉnh SMPL.");
     }
   }
 
-  async function refresh() {
-    if (polling) return;
-    polling = true;
-    try {
-      const catalog = await (await load("/api/runs")).json();
-      window.dispatchEvent(new CustomEvent("splatad:catalog", {detail: catalog}));
-      runs = catalog.filter(run => run.mode === "pose_monitor");
-      const choice = (manualRun && runs.find(run => run.path === runSelect.value))
-        || runs.findLast(run => run.variant === "R2") || runs.at(-1);
-      options(runSelect, runs.map(run => [run.path, `${run.scene} · ${run.variant} · ${run.run_id}`]),
-        choice?.path, "Chưa có run");
-      await showRun(choice);
-    } catch {
-      status.textContent = "Chưa kết nối được monitor. Sẽ thử lại.";
-    } finally {
-      polling = false;
-    }
-  }
-
-  runSelect.addEventListener("change", () => {
-    manualRun = true;
-    void showRun(runs.find(run => run.path === runSelect.value));
-  });
-  observationSelect.addEventListener("change", draw);
-  void refresh();
-  window.setInterval(refresh, 8000);
+  observation.addEventListener("change", draw);
+  window.addEventListener("splatad:scene", update);
 })();

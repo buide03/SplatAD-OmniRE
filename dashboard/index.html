@@ -5,166 +5,105 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <link rel="icon" href="data:,">
-  <title>SplatAD / OmniRE · PandaSet Replay</title>
+  <title>SplatAD / OmniRE · PandaSet</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
   <script src="/pose-monitor.js" defer></script>
 </head>
 <body>
   <header class="top">
-    <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>SplatAD <b>/</b> OmniRE</span></div>
-    <nav aria-label="Điều hướng">
-      <a class="active" href="#replay">Phát lại cảnh</a>
-      <a href="#observations">Quan sát</a>
-      <a href="#pose-monitor">Hiệu chỉnh SMPL</a>
-      <a href="#training">Huấn luyện</a>
-    </nav>
-    <span class="project">PANDASET RESEARCH</span>
+    <div class="top-inner">
+      <a class="brand" href="#replay"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>SplatAD <span>/</span> OmniRE</a>
+      <a href="#pose-monitor" class="section-link">Pose SMPL</a>
+    </div>
   </header>
-
   <main>
-    <section id="replay">
-      <div class="intro">
-        <div>
-          <p class="eyebrow"><span></span> PandaSet · Người đi bộ</p>
-          <h1 id="scene-title">Phát lại cảnh</h1>
-          <p class="subtitle" id="context">Chọn cảnh, camera và cấu hình để xem lại chuyển động.</p>
-        </div>
-        <div class="filters">
-          <label>Cảnh <select id="scene" aria-label="Chọn cảnh"></select></label>
-          <label>Cấu hình <select id="run" aria-label="Chọn cấu hình"></select></label>
-          <label>Camera <select id="camera" aria-label="Chọn camera"></select></label>
-        </div>
+    <section id="replay" aria-labelledby="scene-title">
+      <div class="section-head scene-head">
+        <h1 id="scene-title">PandaSet</h1>
+        <label class="inline-label">Cảnh <select id="scene" aria-label="Chọn cảnh" disabled></select></label>
       </div>
-
-      <div class="replay-grid" id="replay-grid">
-        <article class="card player-card">
-          <div class="card-head">
-            <div><h2 id="video-title">Góc nhìn camera</h2><span id="video-detail">Toàn cảnh RGB</span></div>
-            <span class="pill" id="variant-label">—</span>
+      <div class="player-card">
+        <div class="video-toolbar">
+          <div role="tablist" aria-label="Video toàn cảnh" class="tabs">
+            <button id="source-tab" type="button" role="tab" aria-selected="true" aria-controls="video-panel" data-mode="source">Gốc</button>
+            <button id="render-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="render" tabindex="-1">Render</button>
           </div>
-          <div id="front-labels" class="front-labels" aria-label="Thứ tự camera từ trái sang phải" hidden></div>
+          <select id="run" aria-label="Chọn bản render" hidden></select>
+        </div>
+        <div id="video-panel" role="tabpanel" aria-labelledby="source-tab">
           <div class="screen" id="video-screen">
-            <video id="player" playsinline preload="metadata" muted></video>
-            <div id="screen-empty" class="screen-empty">
-              <h3>Chưa có video cho cấu hình này</h3><p>Video xuất từ checkpoint sẽ xuất hiện tại đây.</p>
-            </div>
-            <div class="video-label" id="camera-label"></div>
+            <video id="player" playsinline preload="metadata" muted hidden></video>
+            <p class="screen-empty" id="screen-empty" role="status">Đang tải video…</p>
           </div>
+          <div id="front-labels" class="front-labels" aria-label="Camera" hidden></div>
           <div class="transport">
-            <button id="play" class="play" aria-label="Phát" title="Phát">▶</button>
+            <button id="play" class="play" type="button" aria-label="Phát" disabled><span aria-hidden="true">▶</span></button>
             <time id="current-time">00:00.0</time>
-            <input id="seek" type="range" min="0" max="1" step=".001" value="0" aria-label="Vị trí phát lại">
+            <input id="seek" type="range" min="0" max="1" step=".001" value="0" aria-label="Vị trí phát lại" disabled>
             <time id="total-time">00:00.0</time>
-            <select id="speed" aria-label="Tốc độ phát">
+            <select id="speed" aria-label="Tốc độ phát" disabled>
               <option value=".25">0.25×</option><option value=".5">0.5×</option>
               <option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option>
             </select>
           </div>
-        </article>
-
-        <aside class="card metrics">
-          <div class="card-head">
-            <div><h2>Chất lượng tái tạo</h2><span id="metric-scope">Trung bình theo quan sát</span></div>
-          </div>
-          <div class="metric-grid" id="scalars"></div>
-          <div class="stats" id="playback-stats"></div>
-          <p class="note" id="metric-note" role="status"></p>
-          <h3 class="coverage-title">Phân bố cự ly</h3>
-          <div class="stats coverage" id="coverage"></div>
-        </aside>
+        </div>
       </div>
     </section>
 
-    <section class="section" id="observations">
+    <section id="pose-monitor" class="pose-section" aria-labelledby="pose-title">
       <div class="section-head">
-        <div><p class="eyebrow"><span></span> Quan sát cố định</p><h2>Kiểm tra người đi bộ</h2></div>
-        <div class="filters">
-          <label>Cự ly <select id="distance"><option value="all">Tất cả</option><option value="near">Gần ≤ 15 m</option>
-            <option value="mid">Trung bình</option><option value="far">Xa ≥ 30 m</option></select></label>
-          <label>UUID <select id="person" aria-label="Chọn người đi bộ"></select></label>
-        </div>
+        <h2 id="pose-title">Pose SMPL</h2>
+        <select id="pose-observation" aria-label="Chọn quan sát pose" hidden></select>
       </div>
-      <div class="observation-grid">
-        <article class="card evidence">
-          <div class="card-head"><div><h2>Đối chiếu khung hình</h2><span id="evidence-detail">Chọn một quan sát trong bảng</span></div>
-          <button id="jump" class="outline" disabled>Đến khung hình</button></div>
-          <div class="evidence-panels" id="panels"></div>
-        </article>
-        <article class="card table-card">
-          <div class="card-head"><div><h2>Danh sách quan sát</h2><span id="observation-count">0 quan sát</span></div></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Frame</th><th>UUID</th><th>Camera</th><th>Cự ly</th><th>PSNR</th><th>Hit LiDAR</th></tr></thead>
-              <tbody id="observations-body"></tbody>
-            </table>
+      <dl id="pose-extraction" class="metric-list" aria-label="Trích xuất pose từ ba camera trước" hidden></dl>
+      <p id="pose-status" class="empty-note" role="status">Đang tải dữ liệu pose…</p>
+
+      <div id="pose-results" class="pose-results" hidden>
+        <div class="pose-heading">
+          <h3>So khớp mesh</h3>
+          <div id="pose-detail"></div>
+        </div>
+        <div id="pose-panels" class="pose-panels"></div>
+        <dl id="pose-fit" class="metric-list fit-list" aria-label="Độ khớp pose" hidden></dl>
+        <p id="pose-roi" class="subtle" hidden></p>
+
+        <details class="pose-diagnostics">
+          <summary>Cập nhật pose trong lúc train</summary>
+          <div class="diagnostic-grid">
+            <div class="diagnostic">
+              <h4>Các mốc huấn luyện</h4>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>Bước</th><th>RGB MAE</th><th>IoU mesh</th><th>Lỗi điểm chiếu</th></tr></thead>
+                  <tbody id="pose-history"></tbody>
+                </table>
+              </div>
+            </div>
+            <div id="pose-probe-card" class="diagnostic">
+              <h4>Một bước thử cập nhật pose</h4>
+              <p id="pose-probe-detail" class="subtle" hidden></p>
+              <div id="pose-probe-table" class="table-scroll">
+                <table>
+                  <thead><tr><th>Chỉ số</th><th>Trước</th><th>Sau</th></tr></thead>
+                  <tbody id="pose-probe"></tbody>
+                </table>
+              </div>
+            </div>
+            <div id="pose-gradient-card" class="diagnostic gradient-card" hidden>
+              <h4>Gradient và độ dịch chuyển pose</h4>
+              <p id="pose-gradient-detail" class="subtle" hidden></p>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>Tham số</th><th>Gradient thử</th><th>Δ thử</th><th>Gradient train</th><th>Δ train</th></tr></thead>
+                  <tbody id="pose-gradients"></tbody>
+                </table>
+              </div>
+            </div>
           </div>
-        </article>
+        </details>
       </div>
     </section>
-
-    <section class="section" id="pose-monitor">
-      <div class="section-head">
-        <div><p class="eyebrow"><span></span> RGB theo UUID, camera và frame</p><h2>Hiệu chỉnh SMPL</h2></div>
-        <div class="filters">
-          <label>Run theo dõi <select id="pose-run"></select></label>
-          <label>Quan sát <select id="pose-observation"></select></label>
-        </div>
-      </div>
-      <p id="pose-status" class="note" role="status">Đang tìm dữ liệu monitor.</p>
-      <div id="pose-results" hidden>
-        <article class="card pose-evidence">
-          <div class="card-head"><div><h2>Mesh và RGB trên cùng ảnh</h2><span id="pose-detail"></span></div></div>
-          <div id="pose-panels" class="evidence-panels"></div>
-        </article>
-        <div class="observation-grid pose-monitor-grid">
-          <article class="card table-card">
-            <div class="card-head"><div><h2>Diễn tiến qua các bước train</h2><span id="pose-roi"></span></div></div>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>Bước</th><th>RGB MAE ↓</th><th>IoU mesh ↑</th><th>Lỗi điểm chiếu ↓</th></tr></thead>
-                <tbody id="pose-history"></tbody>
-              </table>
-            </div>
-          </article>
-          <article class="card table-card">
-            <div class="card-head"><div><h2>Probe pose từ loss RGB toàn cảnh</h2><span id="pose-probe-detail"></span></div></div>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>Chỉ số</th><th>Trước</th><th>Sau</th><th>Thay đổi</th></tr></thead>
-                <tbody id="pose-probe"></tbody>
-              </table>
-            </div>
-          </article>
-          <article class="card table-card pose-gradient-card">
-            <div class="card-head"><div><h2>Gradient probe và cập nhật train thật</h2><span id="pose-gradient-detail"></span></div></div>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>Nhóm pose</th><th>Norm probe</th><th>Δ probe</th><th>Norm train</th><th>Δ train</th></tr></thead>
-                <tbody id="pose-gradients"></tbody>
-              </table>
-            </div>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section" id="training">
-      <div class="section-head"><div><p class="eyebrow"><span></span> Checkpoint</p><h2>Nhật ký huấn luyện</h2></div>
-        <div class="filters"><label>Cảm biến <select id="sensor"><option value="rgb">RGB</option><option value="lidar">LiDAR</option></select></label></div>
-      </div>
-      <div class="observation-grid">
-        <article class="card chart-card">
-          <div class="card-head"><div><h2>Loss toàn cảnh</h2><span id="chart-status">Chưa có nhật ký huấn luyện.</span></div></div>
-          <div class="chart-area"><canvas id="chart" aria-label="Biểu đồ loss theo bước huấn luyện"></canvas></div>
-        </article>
-        <article class="card">
-          <div class="card-head"><div><h2>Gradient SMPL</h2><span id="gradient-step">Bước gần nhất</span></div></div>
-          <div id="gradients" class="stats"></div>
-        </article>
-      </div>
-    </section>
-    <footer>Ảnh nguồn PandaSet · Scale AI và Hesai</footer>
   </main>
 </body>
 </html>

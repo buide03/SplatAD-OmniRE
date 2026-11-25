@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .geometry import matrix_quat, quat_matrix
-from .prepare import dump_json, read_json, sha256
+from .prepare import dump_json, front_pose_summary, read_json, sha256
 
 
 def camera_indices(manager):
@@ -272,7 +272,7 @@ def load_checkpoint(config_file, checkpoint=None):
     return eval_setup(config_file, update_config_callback=update)
 
 
-def run_record(config, checkpoint, step, manifest_path, mode):
+def run_record(config, checkpoint, step, manifest_path, manifest, mode):
     base = config.get_base_dir()
     stats_path = base / "run_stats.json"
     stats = read_json(stats_path) if stats_path.exists() else {}
@@ -280,6 +280,7 @@ def run_record(config, checkpoint, step, manifest_path, mode):
         "scene": config.pipeline.model.scene_id, "variant": config.pipeline.model.variant,
         "run_id": config.timestamp, "step": step, "mode": mode, "checkpoint": checkpoint.name,
         "manifest_sha256": sha256(manifest_path), "metrics": "metrics.json",
+        "pose_summary": front_pose_summary(manifest) if config.pipeline.model.variant != "R0" else None,
         "training": "training.jsonl" if (base / "training.jsonl").exists() else None,
         "run_stats": stats if stats.get("step") == step else {},
         "environment": read_json(base / "environment.json") if (base / "environment.json").exists() else {},
@@ -311,7 +312,7 @@ def main():
         parser.error("The manifest belongs to a different scene")
     mode = "zero_smpl_velocity" if args.zero_smpl_velocity else "checkpoint"
     pipeline.model.human_motion = not args.zero_smpl_velocity
-    record = run_record(config, checkpoint, step, path, mode)
+    record = run_record(config, checkpoint, step, path, manifest, mode)
     metadata_path = args.output / "run.json"
     if metadata_path.exists():
         existing = read_json(metadata_path)

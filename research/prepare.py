@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .sync_video import FRONT_CAMERAS
 
 CAMERAS = ("front", "front_left", "front_right", "left", "right", "back")
 OMNIRE_POSE_CAMERAS = CAMERAS
@@ -31,6 +32,21 @@ def read_json(path):
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def front_pose_summary(manifest):
+    """Count selected SMPL tracks and valid person-frames seen by the front cameras."""
+    selected = set(manifest.get("selected_uuids", []))
+    frames = {"4d_humans": set(), "omnire_interpolation": set()}
+    tracks = set()
+    for row in manifest["observations"]:
+        source = row.get("pose_source")
+        if (row["uuid"] in selected and row["camera"] in FRONT_CAMERAS
+                and row.get("smpl_valid") and source in frames):
+            frames[source].add((row["uuid"], row["frame"]))
+            tracks.add(row["uuid"])
+    return {"tracks": len(tracks), "direct_frames": len(frames["4d_humans"]),
+            "completed_frames": len(frames["omnire_interpolation"])}
 
 
 def camera_at(scene, camera, frame):

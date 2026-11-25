@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from research.pose_monitor import PoseMonitor, measure_rgb, polygon_mask, pose_only_rgb_step, select_observations
+from research.prepare import front_pose_summary
 
 
 class Person(nn.Module):
@@ -160,3 +161,17 @@ def test_monitor_can_inspect_an_explicit_occluded_observation_without_scoring_it
     cameras = {("front", row["frame"]): index for index, row in enumerate(rows)}
     model = SimpleNamespace(person_index={"actor": 0})
     assert select_observations({"observations": rows}, model, cameras) == [selected]
+
+
+def test_pose_summary_deduplicates_camera_views_and_counts_completed_frames():
+    direct = {"uuid": "first", "camera": "front", "frame": 7, "smpl_valid": True, "pose_source": "4d_humans"}
+    rows = [
+        direct, {**direct, "camera": "front_right"},
+        {**direct, "frame": 8, "pose_source": "omnire_interpolation", "limbs_visible": False},
+        {**direct, "uuid": "second", "camera": "back"},
+        {**direct, "uuid": "unselected"},
+        {**direct, "frame": 9, "smpl_valid": False},
+    ]
+    assert front_pose_summary({"selected_uuids": ["first", "second"], "observations": rows}) == {
+        "tracks": 1, "direct_frames": 1, "completed_frames": 1,
+    }

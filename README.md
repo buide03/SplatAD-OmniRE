@@ -12,9 +12,9 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 ### Bắt đầu trên Colab
 
 1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` cho tự dò trong My Drive và Shared Drives, hoặc nhập đường dẫn như `/content/drive/MyDrive/datasets/pandaset` hay `/content/drive/MyDrive/pandaset.zip`. Thư mục đã giải nén được đọc trực tiếp. Với ZIP, Colab giải nén các scene đã chọn vào `/content/pandaset-from-drive`. Notebook kiểm tra đủ 80 ảnh mỗi camera đã chọn, scan LiDAR và cuboid của scene.
-2. Chạy cell **Xem ba camera gốc và monitor** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt `SMPL_PICKLE` và `MODEL_VERSION` theo file Neutral đã có trên Drive. Notebook GitHub mặc định dùng v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
+2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt `SMPL_PICKLE` và `MODEL_VERSION` theo file Neutral đã có trên Drive. Notebook GitHub mặc định dùng v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
 3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. R1/R2 cần bộ pose OmniRe tương ứng cho từng cảnh. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
-4. Sau mỗi checkpoint, notebook xuất clip của từng camera ở độ phân giải render và clip `front-triptych.mp4`. Chọn **Ba camera trước** trong dashboard để phát hoặc tua trái, giữa, phải trên cùng timeline. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
+4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
 
 Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
 
@@ -28,7 +28,7 @@ Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_P
 - **RGB.** Render đủ nền, xe và người tại frame gốc. Tính MAE, PSNR, SSIM và LPIPS AlexNet cho toàn ảnh và crop GT. Crop mở rộng tối thiểu 64 × 64 px và giữ mật độ pixel. Trường hợp ảnh khớp hoàn toàn dùng PSNR 120 dB để lưu JSON.
 - **LiDAR.** Range MAE tính trên tia có phản hồi GT nằm trong cuboid của UUID, xác định từ chính raster đã dùng để render. Xuất số hit trước và sau lọc quantile. Thiếu hit được ghi là thiếu mẫu. Range panel hiển thị batch raster đầu tiên, metric dùng toàn bộ batch.
 - **Tổng hợp.** Đối chiếu trên khóa scene/UUID/camera/frame chung có SMPL hợp lệ, sau đó trung bình quan sát → UUID → scene. LiDAR gộp tia theo scene/UUID/scan trong mỗi bin. `comparison.csv` và `comparison.json` kèm số mẫu và kết quả theo scene.
-- **Phát lại.** Mặc định MP4 H.264, CRF 16 và 60 FPS. Ba view `front_left`, `front`, `front_right` chia sẻ cùng lưới timestamp từ quan sát đầu tiên đến cuối cùng. Pose cảnh dùng mốc giữa phơi sáng của camera trước làm tham chiếu, còn từng camera giữ hiệu chỉnh rolling shutter. Render lần lượt mỗi view ở độ phân giải gốc để giảm VRAM. Ba clip được ghép trái, giữa, phải vào một MP4 tối đa 3840 px ngang. Dashboard có một thanh tua chung và giữ vị trí khi chuyển xem riêng một camera. Metric độ chính xác dùng các mốc có quan sát cảm biến thật.
+- **Phát lại.** Mặc định MP4 H.264, CRF 16 và 60 FPS cho bản render. Ba view `front_left`, `front`, `front_right` chia sẻ cùng lưới timestamp từ quan sát đầu tiên đến cuối cùng. Pose cảnh dùng mốc giữa phơi sáng của camera trước làm tham chiếu, còn từng camera giữ hiệu chỉnh rolling shutter. Render lần lượt mỗi view ở độ phân giải gốc để giảm VRAM. Ba clip được ghép trái, giữa, phải vào một MP4 tối đa 3840 px ngang. Dashboard giữ vị trí phát theo cảnh khi đổi giữa Gốc và Render.
 
 ### Thứ tự huấn luyện theo độ khó
 
@@ -51,7 +51,8 @@ Thứ tự nằm trong [protocol/curriculum.json](protocol/curriculum.json). Col
 Số liệu lấy từ sáu camera, pose OmniRe công khai và SMPL Neutral v1.0 dùng cho phép kiểm kê CPU. [protocol/pilot.json](protocol/pilot.json) ghi số frame, độ bao phủ và hit LiDAR trước review. Các JSON review đi kèm ghi những crop đã kiểm tra. Cảnh 008 có nhiều vùng bị lan can, xe hoặc bồn cây che chân. Đánh giá chuyển động chi ở cự ly xa cần bổ sung review trực tiếp trên frame đã chọn. Notebook mặc định dùng Neutral v1.1 cho các run GPU.
 ### Monitor hiệu chỉnh SMPL
 
-- **Mesh chiếu.** Mục **Hiệu chỉnh SMPL** hiển thị RGB gốc, mesh khởi tạo và mesh tại từng mốc với cùng hiệu chuẩn camera. IoU đo silhouette mesh với polygon vẽ tay. Nếu có keypoint GT, monitor ghi sai số điểm chiếu bằng pixel. Khi thiếu nhãn hình học, dùng ảnh overlay để kiểm tra trực quan.
+- **Trích xuất pose.** Mục **Pose SMPL** đếm track đã chọn và gộp theo từng cặp người–frame ở ba camera trước. Pose trực tiếp đến từ 4D-Humans. Pose nội suy đến từ bước hoàn thiện pose của OmniRe.
+- **Mesh chiếu.** So sánh RGB gốc, mesh khởi tạo và mesh hiệu chỉnh với cùng hiệu chuẩn camera. IoU dùng polygon vẽ tay và lỗi điểm chiếu dùng keypoint có nhãn. Mở **Cập nhật pose trong lúc train** để xem lịch sử, gradient và phép thử cập nhật.
 - **RGB vùng người.** Monitor tính L1/MAE từ ảnh toàn cảnh đã render trên cùng mask người hoặc crop bbox cố định. So sánh qua các mốc bằng cột `RGB MAE`. Đây là chỉ số theo dõi vùng người. Loss train tiếp tục lấy từ cấu hình SplatAD toàn cảnh.
 - **Probe gradient R2.** Tính gradient từ loss RGB toàn cảnh của cùng một ảnh, thử một bước Adam mới với learning rate hiện hành và chỉ đổi các hàng pose đang hoạt động của UUID này. Monitor đo lại loss, RGB MAE và mesh IoU sau bước thử rồi khôi phục pose. Bảng cập nhật train thật ghi riêng norm gradient và dịch chuyển tham số khi batch train lấy đúng ảnh đó. IoU tăng hoặc lỗi điểm chiếu giảm mới là dấu hiệu mesh sát ảnh hơn.
 
@@ -96,7 +97,7 @@ Các tọa độ và `vertex_id` ở trên minh họa định dạng. Chọn ID 
 python -m research.dashboard --artifacts /path/to/artifacts --port 8765
 ```
 
-Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Trình phát đọc MP4 theo byte range để tua, đổi tốc độ và nhảy từ một dòng metric tới đúng frame. Chọn sensor RGB hoặc LiDAR để xem loss và gradient theo bước train. Khi chỉ có video PandaSet gốc, dashboard hiển thị số liệu kiểm kê và để trống metric tái tạo.
+Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Trình phát đọc MP4 theo byte range để tua và đổi tốc độ. Dashboard đọc số liệu pose từ manifest và monitor. Các tệp đánh giá RGB/LiDAR đầy đủ vẫn lưu cùng artifact để phục vụ đối chứng.
 
 Các lệnh riêng có thể chạy từ root repo sau khi kích hoạt `.deps/train-env/activate-research`.
 
