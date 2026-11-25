@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>SplatAD / OmniRE · PandaSet Replay</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>SplatAD <b>/</b> OmniRE</span></div>
+    <nav aria-label="Điều hướng">
+      <a class="active" href="#replay">Phát lại cảnh</a>
+      <a href="#observations">Quan sát</a>
+      <a href="#training">Huấn luyện</a>
+    </nav>
+    <span class="project">PANDASET RESEARCH</span>
+  </header>
+
+  <main>
+    <section id="replay">
+      <div class="intro">
+        <div>
+          <p class="eyebrow"><span></span> PandaSet · Người đi bộ</p>
+          <h1 id="scene-title">Phát lại cảnh</h1>
+          <p class="subtitle" id="context">Chọn cảnh, camera và cấu hình để xem lại chuyển động.</p>
+        </div>
+        <div class="filters">
+          <label>Cảnh <select id="scene" aria-label="Chọn cảnh"></select></label>
+          <label>Cấu hình <select id="run" aria-label="Chọn cấu hình"></select></label>
+          <label>Camera <select id="camera" aria-label="Chọn camera"></select></label>
+        </div>
+      </div>
+
+      <div class="replay-grid">
+        <article class="card player-card">
+          <div class="card-head">
+            <div><h2>Góc nhìn camera</h2><span id="video-detail">Toàn cảnh RGB</span></div>
+            <span class="pill" id="variant-label">—</span>
+          </div>
+          <div class="screen">
+            <video id="player" playsinline preload="metadata" muted></video>
+            <div id="screen-empty" class="screen-empty">
+              <h3>Chưa có video cho cấu hình này</h3><p>Video xuất từ checkpoint sẽ xuất hiện tại đây.</p>
+            </div>
+            <div class="video-label" id="camera-label"></div>
+          </div>
+          <div class="transport">
+            <button id="play" class="play" aria-label="Phát" title="Phát">▶</button>
+            <time id="current-time">00:00.0</time>
+            <input id="seek" type="range" min="0" max="1" step=".001" value="0" aria-label="Vị trí phát lại">
+            <time id="total-time">00:00.0</time>
+            <select id="speed" aria-label="Tốc độ phát">
+              <option value=".25">0.25×</option><option value=".5">0.5×</option>
+              <option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+            </select>
+          </div>
+        </article>
+
+        <aside class="card metrics">
+          <div class="card-head">
+            <div><h2>Chất lượng tái tạo</h2><span id="metric-scope">Trung bình theo quan sát</span></div>
+          </div>
+          <div class="metric-grid" id="scalars"></div>
+          <div class="stats" id="playback-stats"></div>
+          <p class="note" id="metric-note" role="status"></p>
+          <h3 class="coverage-title">Phân bố cự ly</h3>
+          <div class="stats coverage" id="coverage"></div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section" id="observations">
+      <div class="section-head">
+        <div><p class="eyebrow"><span></span> Quan sát cố định</p><h2>Kiểm tra người đi bộ</h2></div>
+        <div class="filters">
+          <label>Cự ly <select id="distance"><option value="all">Tất cả</option><option value="near">Gần ≤ 15 m</option>
+            <option value="mid">Trung bình</option><option value="far">Xa ≥ 30 m</option></select></label>
+          <label>UUID <select id="person" aria-label="Chọn người đi bộ"></select></label>
+        </div>
+      </div>
+      <div class="observation-grid">
+        <article class="card evidence">
+          <div class="card-head"><div><h2>Đối chiếu khung hình</h2><span id="evidence-detail">Chọn một quan sát trong bảng</span></div>
+          <button id="jump" class="outline" disabled>Đến khung hình</button></div>
+          <div class="evidence-panels" id="panels"></div>
+        </article>
+        <article class="card table-card">
+          <div class="card-head"><div><h2>Danh sách quan sát</h2><span id="observation-count">0 quan sát</span></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Frame</th><th>UUID</th><th>Cự ly</th><th>PSNR</th><th>Hit LiDAR</th></tr></thead>
+              <tbody id="observations-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="training">
+      <div class="section-head"><div><p class="eyebrow"><span></span> Checkpoint</p><h2>Nhật ký huấn luyện</h2></div>
+        <div class="filters"><label>Cảm biến <select id="sensor"><option value="rgb">RGB</option><option value="lidar">LiDAR</option></select></label></div>
+      </div>
+      <div class="observation-grid">
+        <article class="card chart-card">
+          <div class="card-head"><div><h2>Loss toàn cảnh</h2><span id="chart-status">Chưa có nhật ký huấn luyện.</span></div></div>
+          <div class="chart-area"><canvas id="chart" aria-label="Biểu đồ loss theo bước huấn luyện"></canvas></div>
+        </article>
+        <article class="card">
+          <div class="card-head"><div><h2>Gradient SMPL</h2><span id="gradient-step">Bước gần nhất</span></div></div>
+          <div id="gradients" class="stats"></div>
+        </article>
+      </div>
+    </section>
+    <footer>Ảnh nguồn PandaSet · Scale AI và Hesai</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,11 @@
+/.deps/
+/runs/
+/data/
+/artifacts/
+**/__pycache__/
+.pytest_cache/
+*.ckpt
+*.pkl
+*.npz
+*.mp4
+.ipynb_checkpoints/

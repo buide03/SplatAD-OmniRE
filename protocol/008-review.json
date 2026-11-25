@@ -1,0 +1,33 @@
+{
+  "observations": [
+    {
+      "uuid": "b70e1b2f-ec09-4cab-88bf-f2114cd3030d",
+      "camera": "front",
+      "frame": 46,
+      "limbs_visible": false,
+      "note": "Bồn cây che chân, chỉ dùng quan sát toàn cảnh."
+    },
+    {
+      "uuid": "dc748ba7-29dd-46aa-ac80-241aca339a6c",
+      "camera": "front",
+      "frame": 46,
+      "limbs_visible": false,
+      "note": "Bồn cây che phần dưới của chân."
+    },
+    {
+      "uuid": "3fa0e649-f0f6-4635-b78f-db9bcd44087e",
+      "camera": "front",
+      "frame": 16,
+      "limbs_visible": false,
+      "note": "Xe và lan can che chân."
+    },
+    {
+      "uuid": "afe1f1bf-2397-471e-b704-2576a59346dd",
+      "camera": "front",
+      "frame": 16,
+      "limbs_visible": false,
+      "note": "Lan can che nửa dưới cơ thể."
+    }
+  ],
+  "foot_contacts": []
+}

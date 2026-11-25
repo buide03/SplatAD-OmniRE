@@ -1,0 +1,131 @@
+{
+  "source_body_version": "smpl_neutral_v1.0",
+  "scenes": [
+    {
+      "scene_id": "011",
+      "role": "mixed_distance",
+      "review": "011-review.json",
+      "selected_uuids_before_review": 18,
+      "coverage_before_review": {
+        "near": {
+          "observations": 431,
+          "usable": 431,
+          "n_uuid": 17,
+          "n_uuid_smpl": 13,
+          "track_frames_smpl": 243,
+          "track_frames_4d_humans": 223,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 76424,
+          "max_simultaneous": 5
+        },
+        "mid": {
+          "observations": 893,
+          "usable": 893,
+          "n_uuid": 34,
+          "n_uuid_smpl": 18,
+          "track_frames_smpl": 343,
+          "track_frames_4d_humans": 257,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 79237,
+          "max_simultaneous": 9
+        },
+        "far": {
+          "observations": 5001,
+          "usable": 3671,
+          "n_uuid": 78,
+          "n_uuid_smpl": 12,
+          "track_frames_smpl": 92,
+          "track_frames_4d_humans": 83,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 59869,
+          "max_simultaneous": 28
+        }
+      }
+    },
+    {
+      "scene_id": "028",
+      "role": "near_multiple",
+      "review": "028-review.json",
+      "selected_uuids_before_review": 2,
+      "coverage_before_review": {
+        "near": {
+          "observations": 67,
+          "usable": 67,
+          "n_uuid": 2,
+          "n_uuid_smpl": 2,
+          "track_frames_smpl": 46,
+          "track_frames_4d_humans": 46,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 10477,
+          "max_simultaneous": 2
+        },
+        "mid": {
+          "observations": 51,
+          "usable": 51,
+          "n_uuid": 2,
+          "n_uuid_smpl": 2,
+          "track_frames_smpl": 33,
+          "track_frames_4d_humans": 33,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 3271,
+          "max_simultaneous": 2
+        },
+        "far": {
+          "observations": 271,
+          "usable": 208,
+          "n_uuid": 9,
+          "n_uuid_smpl": 2,
+          "track_frames_smpl": 15,
+          "track_frames_4d_humans": 14,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 2331,
+          "max_simultaneous": 3
+        }
+      }
+    },
+    {
+      "scene_id": "008",
+      "role": "far_multiple_screening",
+      "review": "008-review.json",
+      "selected_uuids_before_review": 48,
+      "coverage_before_review": {
+        "near": {
+          "observations": 3369,
+          "usable": 3369,
+          "n_uuid": 99,
+          "n_uuid_smpl": 47,
+          "track_frames_smpl": 1166,
+          "track_frames_4d_humans": 1103,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 469452,
+          "max_simultaneous": 41,
+          "max_simultaneous_smpl": 17
+        },
+        "mid": {
+          "observations": 3946,
+          "usable": 3946,
+          "n_uuid": 149,
+          "n_uuid_smpl": 48,
+          "track_frames_smpl": 1089,
+          "track_frames_4d_humans": 927,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 219638,
+          "max_simultaneous": 48,
+          "max_simultaneous_smpl": 19
+        },
+        "far": {
+          "observations": 13227,
+          "usable": 10367,
+          "n_uuid": 300,
+          "n_uuid_smpl": 30,
+          "track_frames_smpl": 213,
+          "track_frames_4d_humans": 194,
+          "manually_visible_limbs": 0,
+          "raw_lidar_hits": 87050,
+          "max_simultaneous": 80,
+          "max_simultaneous_smpl": 17
+        }
+      }
+    }
+  ]
+}

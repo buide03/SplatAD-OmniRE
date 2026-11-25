@@ -1,0 +1,99 @@
+# SplatAD / OmniRE trên PandaSet
+
+Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng cảnh. PandaSet cung cấp RGB, LiDAR và cuboid theo UUID. OmniRe/4D-Humans khởi tạo pose. SplatAD giữ renderer RGB, renderer LiDAR và công thức loss để đối chiếu ba cấu hình.
+
+| Cấu hình | Biểu diễn người đi bộ | Tối ưu |
+| --- | --- | --- |
+| **R0** | Actor rigid trong SplatAD | Gaussian và các nhóm SplatAD |
+| **R1** | Một Gaussian trên mỗi vertex SMPL | Gaussian người, pose cố định |
+| **R2** | Khởi tạo giống R1 | Gaussian, root translation, root rotation và 23 rotation khớp |
+| **R2/vận tốc 0** | Cùng checkpoint R2 | Đặt riêng vận tốc Gaussian người về 0 khi render |
+
+### Bắt đầu trên Colab
+
+1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và chọn GPU.
+2. Đặt `SMPL_NEUTRAL.pkl` từ bản SMPL Neutral v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. Trọng số SMPL được cung cấp riêng qua trang chính thức. [SMPL](https://smpl.is.tue.mpg.de/)
+3. Chạy các cell với `STAGE = "smoke"` để dùng cảnh `011/front_right`, 200 bước cho mỗi cấu hình. Đặt `STAGE = "pilot"` để chạy 1.200 bước trên ba cảnh, hoặc `"confirm"` cho 4.000 bước. Giữ `RUN_ID` và chọn `"confirm"` để tiếp tục lịch train của run pilot.
+4. Dashboard hiển thị ở cell cuối. Cấu hình chạy, checkpoint, metric, log và video lưu trên Google Drive dưới `MyDrive/SplatAD-OmniRE/`.
+
+Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
+
+Dữ liệu tải theo scene từ archive PandaSet đã pin. Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_PUBLIC_POSES = False` cho cảnh cần chạy lại 4D-Humans. Nhánh này dùng môi trường Python 3.10 riêng. [PandaSet](https://huggingface.co/datasets/georghess/pandaset) · [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
+
+### Quy ước và số liệu
+
+- **Pose.** JSON gắn UUID sau khi đối chiếu ID nội bộ và sibling LiDAR. Rotation root lấy từ camera 4D-Humans thực sự chọn. Translation dịch tâm bbox mesh đã skinning về tâm cuboid. Timestamp tính theo mốc giữa ảnh, xấp xỉ bằng timestamp camera PandaSet trừ 10 ms. Adapter đổi sang hệ cảnh và trừ epoch bằng độ chính xác đầy đủ trước khi cast float32.
+- **Gaussian.** DA-pose canonical với trọng số LBS cố định, tâm tại vertex, quaternion theo pháp tuyến, scale theo diện tích và latent 13 kênh. Tâm và hướng nhận gradient ở cả hai nhánh renderer. Vận tốc world nội suy từ biến đổi khớp lân cận. Các cấu hình giữ số hạt cố định nên callback refinement tắt. UUID không có track SMPL đủ dùng đi theo actor rigid. Trong khoảng trống dài của track đã chọn, opacity của SMPL bằng 0.
+- **Kiểm kê.** Cự ly là khoảng cách từ tâm camera đến tâm cuboid. Nhóm gần ≤15 m, trung bình 15–30 m, xa ≥30 m. Ngưỡng chiều cao bbox mặc định là 28 px. Bộ kiểm kê phân biệt pose trực tiếp từ 4D-Humans với pose do OmniRe nội suy. Ghi rõ trường che khuất và tay/chân nhìn thấy qua review thủ công.
+- **RGB.** Render đủ nền, xe và người tại frame gốc. Tính MAE, PSNR, SSIM và LPIPS AlexNet cho toàn ảnh và crop GT. Crop mở rộng tối thiểu 64 × 64 px và giữ mật độ pixel. Trường hợp ảnh khớp hoàn toàn dùng PSNR 120 dB để lưu JSON.
+- **LiDAR.** Range MAE tính trên tia có phản hồi GT nằm trong cuboid của UUID, xác định từ chính raster đã dùng để render. Xuất số hit trước và sau lọc quantile. Thiếu hit được ghi là thiếu mẫu. Range panel hiển thị batch raster đầu tiên, metric dùng toàn bộ batch.
+- **Tổng hợp.** Đối chiếu trên khóa scene/UUID/camera/frame chung có SMPL hợp lệ, sau đó trung bình quan sát → UUID → scene. LiDAR gộp tia theo scene/UUID/scan trong mỗi bin. `comparison.csv` và `comparison.json` kèm số mẫu và kết quả theo scene.
+- **Phát lại.** Mặc định MP4 H.264 chất lượng CRF 16, 60 FPS, độ phân giải gốc. Mỗi khung được render lại từ mô hình, nội suy camera và pose theo thời gian. Dashboard hiển thị FPS phát lại và FPS dựng trên GPU. Kiểm nghiệm độ chính xác chỉ dùng các mốc có quan sát cảm biến thật.
+
+### Cảnh pilot đã khảo sát
+
+| Cảnh | Vai trò | UUID có SMPL nhóm gần | UUID có SMPL nhóm xa |
+| --- | --- | ---: | ---: |
+| `011` | Gần và xa cùng góc nhìn | 13 | 12 |
+| `028` | Hai người đi bộ ở khoảng 8–9 m trong `front_left` | 2 | 2 |
+| `008` | Sàng lọc nhiều track ở ≥30 m | 47 | 30 |
+
+Số liệu lấy từ sáu camera, pose OmniRe công khai và SMPL Neutral v1.0 dùng cho phép kiểm kê CPU. [protocol/pilot.json](protocol/pilot.json) ghi số frame, độ bao phủ và hit LiDAR trước review. Các JSON review đi kèm ghi những crop đã kiểm tra. Cảnh 008 có nhiều vùng bị lan can, xe hoặc bồn cây che chân. Đánh giá chuyển động chi ở cự ly xa cần bổ sung review trực tiếp trên frame đã chọn. Notebook mặc định dùng Neutral v1.1 cho các run GPU.
+### Nhãn kiểm tra thủ công
+
+Đặt tệp `inputs/011-review.json` trên Drive trước khi tạo manifest. Để tạo lại một bộ probe với nhãn mới, dùng manifest và mã run mới cho cả ba cấu hình.
+
+```json
+{
+  "observations": [
+    {
+      "uuid": "UUID từ bộ kiểm kê",
+      "camera": "front_right",
+      "frame": 30,
+      "bbox_xyxy": [812, 442, 860, 570],
+      "occlusion": 0.15,
+      "limbs_visible": true,
+      "keypoints": {
+        "left_ankle": {"xy": [835, 548], "vertex_id": 0}
+      }
+    }
+  ],
+  "foot_contacts": [
+    {
+      "uuid": "UUID từ bộ kiểm kê",
+      "camera": "front_right",
+      "vertex_id": 0,
+      "start_frame": 25,
+      "end_frame": 30
+    }
+  ]
+}
+```
+
+Các tọa độ và `vertex_id` ở trên minh họa định dạng. Chọn ID trên mesh SMPL đã ghép đúng điểm gối, cổ chân, gót hoặc mũi chân. Bỏ qua trường thiếu nhãn. Panel hiển thị GT, overlay mesh khởi tạo, overlay mesh hiện tại, RGB render và sai số ảnh cho cùng crop.
+
+### Chạy dashboard local
+
+```bash
+python -m research.dashboard --artifacts /path/to/artifacts --port 8765
+```
+
+Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Trình phát đọc MP4 theo byte range để tua, đổi tốc độ và nhảy từ một dòng metric tới đúng frame. Chọn sensor RGB hoặc LiDAR để xem loss và gradient theo bước train. Khi chỉ có video PandaSet gốc, dashboard hiển thị số liệu kiểm kê và để trống metric tái tạo.
+
+Các lệnh riêng có thể chạy từ root repo sau khi kích hoạt `.deps/train-env/activate-research`.
+
+```bash
+python -m research.train --help
+python -m research.probe --help
+python -m research.evaluate --help
+python -m research.replay --help
+python -m research.compare --help
+python -m pytest -q
+```
+
+### Mã nguồn và dữ liệu
+
+- [splatad.patch](splatad.patch) thêm UUID và điểm ghép Gaussian chung trước hai lời gọi GSplat ở commit đã pin.
+- [research](research/) chứa export, adapter LBS, train, đo metric, bản phát lại và server dashboard.
+- [THIRD_PARTY.md](THIRD_PARTY.md) ghi các phụ thuộc và nguồn mã.
+- Chỉ nạp các tệp pose pickle, cấu hình YAML và checkpoint từ nguồn tin cậy. Các tệp này chứa định dạng tuần tự hóa có thể thực thi mã khi nạp.

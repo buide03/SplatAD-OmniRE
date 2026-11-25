@@ -1,0 +1,33 @@
+{
+  "observations": [
+    {
+      "uuid": "632e1793-5f30-4f23-bce8-4b818dc51e22",
+      "camera": "front_left",
+      "frame": 64,
+      "limbs_visible": true,
+      "note": "Người đi bộ thấy các pha bước ở góc trước trái."
+    },
+    {
+      "uuid": "871fb43d-3dbf-41fd-8323-8f47747690f2",
+      "camera": "front_left",
+      "frame": 64,
+      "limbs_visible": true,
+      "note": "Người đi bộ thứ hai nhìn được tay và chân qua giao nhau."
+    },
+    {
+      "uuid": "632e1793-5f30-4f23-bce8-4b818dc51e22",
+      "camera": "left",
+      "frame": 58,
+      "limbs_visible": false,
+      "note": "Xe che nửa dưới của người."
+    },
+    {
+      "uuid": "871fb43d-3dbf-41fd-8323-8f47747690f2",
+      "camera": "left",
+      "frame": 58,
+      "limbs_visible": false,
+      "note": "Xe che bàn chân."
+    }
+  ],
+  "foot_contacts": []
+}

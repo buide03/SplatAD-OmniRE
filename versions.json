@@ -1,0 +1,25 @@
+{
+  "neurad_studio": {
+    "url": "https://github.com/georghess/neurad-studio.git",
+    "commit": "aea389a936890eb48e1b43a493a52c0194559b48"
+  },
+  "omnire": {
+    "url": "https://github.com/ziyc/drivestudio.git",
+    "commit": "e59bda4fa681f829dbb1d65f0de582b0f633c450"
+  },
+  "gsplat": {
+    "url": "https://github.com/carlinds/splatad.git",
+    "commit": "6e31ad766d39e0c33f9034a2ed772d51364b2343"
+  },
+  "humans4d": {
+    "commit": "6ec79656a23c33237c724742ca2a0ec00b398b53"
+  },
+  "phalp": {
+    "url": "https://github.com/brjathu/PHALP.git",
+    "commit": "96f7e6c09fb858ec3f597d59246c151ab4394bc3"
+  },
+  "pytorch3d": {
+    "url": "https://github.com/facebookresearch/pytorch3d.git",
+    "commit": "f99655c4fc6c28bd13d141219581bf3e73df60a4"
+  }
+}

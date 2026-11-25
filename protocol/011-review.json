@@ -1,0 +1,26 @@
+{
+  "observations": [
+    {
+      "uuid": "aeee4e22-788d-4595-903b-3be347d78092",
+      "camera": "front_right",
+      "frame": 8,
+      "limbs_visible": true,
+      "note": "Thấy dáng bước và cánh tay trên ảnh gốc."
+    },
+    {
+      "uuid": "67744106-97dc-4c8c-ad42-1c5db62d4c3b",
+      "camera": "front_right",
+      "frame": 24,
+      "limbs_visible": false,
+      "note": "Mui xe che phần chân."
+    },
+    {
+      "uuid": "bc7f2c0d-7ede-4556-9f58-172ff399bc98",
+      "camera": "front_right",
+      "frame": 41,
+      "limbs_visible": false,
+      "note": "Nhìn được dáng người, chân và khớp mờ ở 67 px."
+    }
+  ],
+  "foot_contacts": []
+}
