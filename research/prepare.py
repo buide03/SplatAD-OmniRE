@@ -315,7 +315,7 @@ def inventory(args):
             ))
             probe_keys.add((camera, options[choice][0]))
     for row in rows:
-        row["probe"] = row["usable"] and (row["camera"], row["frame"]) in probe_keys
+        row["probe"] = row["usable"] and (row["pose_monitor"] or (row["camera"], row["frame"]) in probe_keys)
     long_enough = {track["uuid"] for track in tracks if sum(frame["valid"] for frame in track["frames"]) >= 2}
     tracks_selected = sorted({row["uuid"] for row in rows if row["uuid"] in long_enough and row["usable"] and row["smpl_valid"]
                               and not row["stationary"]})

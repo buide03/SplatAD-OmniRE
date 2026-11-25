@@ -5,6 +5,7 @@
       "camera": "front_left",
       "frame": 64,
       "limbs_visible": true,
+      "pose_monitor": true,
       "note": "Người đi bộ thấy các pha bước ở góc trước trái."
     },
     {
@@ -12,6 +13,7 @@
       "camera": "front_left",
       "frame": 64,
       "limbs_visible": true,
+      "pose_monitor": true,
       "note": "Người đi bộ thứ hai nhìn được tay và chân qua giao nhau."
     },
     {

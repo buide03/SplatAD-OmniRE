@@ -48,7 +48,8 @@ def drift(current, reference, rotation):
 def select_observations(manifest, model, cameras):
     rows = [
         row for row in manifest["observations"]
-        if row["usable"] and row["smpl_valid"] and row["uuid"] in model.person_index
+        if (row["usable"] or (row.get("pose_monitor") and row.get("limbs_visible") is False))
+        and row["smpl_valid"] and row["uuid"] in model.person_index
         and (row["camera"], row["frame"]) in cameras
     ]
     explicit = [row for row in rows if row.get("pose_monitor")]

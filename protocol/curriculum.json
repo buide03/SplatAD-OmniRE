@@ -1,0 +1,7 @@
+{
+  "scenes": [
+    {"scene_id": "028", "focus": "near", "label": "Người đi bộ ở gần"},
+    {"scene_id": "011", "focus": "multiple", "label": "Nhiều người đi bộ trong cùng khung"},
+    {"scene_id": "008", "focus": "far_occluded", "label": "Người đi bộ ở xa và bị che khuất"}
+  ]
+}

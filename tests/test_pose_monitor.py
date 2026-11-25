@@ -148,3 +148,15 @@ def test_monitor_selects_reviewed_observation_and_logs_exact_rgb_frame(tmp_path)
     assert not monitor.actual
     monitor.observe_training_step({**log, "image_index": 1})
     assert monitor.actual["front/5/actor"]["step"] == 11
+
+
+def test_monitor_can_inspect_an_explicit_occluded_observation_without_scoring_it_as_visible():
+    base = {"uuid": "actor", "camera": "front", "smpl_valid": True, "bbox_height_px": 70,
+            "usable": False, "limbs_visible": False, "probe": False}
+    selected = {**base, "frame": 16, "pose_monitor": True}
+    unmarked = {**base, "frame": 19, "bbox_height_px": 95}
+    unreviewed = {**base, "frame": 22, "limbs_visible": None, "pose_monitor": True}
+    rows = [selected, unmarked, unreviewed]
+    cameras = {("front", row["frame"]): index for index, row in enumerate(rows)}
+    model = SimpleNamespace(person_index={"actor": 0})
+    assert select_observations({"observations": rows}, model, cameras) == [selected]

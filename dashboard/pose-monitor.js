@@ -76,7 +76,9 @@
     const initialIoU = Number.isFinite(metrics.silhouette_initial_iou)
       ? ` · IoU khởi tạo ${decimal(metrics.silhouette_initial_iou, 3)}` : "";
     const counts = metrics.keypoint_count ? ` · ${metrics.keypoint_count} điểm GT` : "";
-    byId("pose-roi").textContent = `${roiName} · ${decimal(metrics.roi_pixels, 0)} px${initialIoU}${counts}`;
+    const occlusion = reference.limbs_visible === false && metrics.roi_source === "fixed_bbox_crop"
+      ? " · Chi bị che, vùng RGB gồm cả vật che" : "";
+    byId("pose-roi").textContent = `${roiName} · ${decimal(metrics.roi_pixels, 0)} px${initialIoU}${counts}${occlusion}`;
     let probeDetail = probeMessages[probe.status] ?? "Đang chờ probe.";
     if (probe.status === "measured" && Number.isFinite(metrics.silhouette_iou) &&
         Number.isFinite(after.silhouette_iou)) {

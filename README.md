@@ -12,8 +12,8 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 ### Bắt đầu trên Colab
 
 1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` cho tự dò trong My Drive và Shared Drives, hoặc nhập đường dẫn như `/content/drive/MyDrive/datasets/pandaset` hay `/content/drive/MyDrive/pandaset.zip`. Thư mục đã giải nén được đọc trực tiếp. Với ZIP, Colab giải nén các scene đã chọn vào `/content/pandaset-from-drive`. Notebook kiểm tra đủ 80 ảnh mỗi camera đã chọn, scan LiDAR và cuboid của scene.
-2. Chạy cell **Xem ba camera gốc và monitor** để xem scene đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt SMPL Neutral v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
-3. Mặc định `STAGE = "scene"` train R2 trên cả ba camera trước của cảnh `011`, rồi render toàn cảnh. Đổi `SCENES = ["011", "028"]` để chọn nhiều scene. Đặt `SCENES = "all"` để dùng toàn bộ scene phát hiện trên Drive. Chọn `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. R1/R2 cần bộ pose OmniRe tương ứng cho từng scene. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
+2. Chạy cell **Xem ba camera gốc và monitor** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt `SMPL_PICKLE` và `MODEL_VERSION` theo file Neutral đã có trên Drive. Notebook GitHub mặc định dùng v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
+3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. R1/R2 cần bộ pose OmniRe tương ứng cho từng cảnh. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
 4. Sau mỗi checkpoint, notebook xuất clip của từng camera ở độ phân giải render và clip `front-triptych.mp4`. Chọn **Ba camera trước** trong dashboard để phát hoặc tua trái, giữa, phải trên cùng timeline. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
 
 Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
@@ -29,6 +29,16 @@ Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_P
 - **LiDAR.** Range MAE tính trên tia có phản hồi GT nằm trong cuboid của UUID, xác định từ chính raster đã dùng để render. Xuất số hit trước và sau lọc quantile. Thiếu hit được ghi là thiếu mẫu. Range panel hiển thị batch raster đầu tiên, metric dùng toàn bộ batch.
 - **Tổng hợp.** Đối chiếu trên khóa scene/UUID/camera/frame chung có SMPL hợp lệ, sau đó trung bình quan sát → UUID → scene. LiDAR gộp tia theo scene/UUID/scan trong mỗi bin. `comparison.csv` và `comparison.json` kèm số mẫu và kết quả theo scene.
 - **Phát lại.** Mặc định MP4 H.264, CRF 16 và 60 FPS. Ba view `front_left`, `front`, `front_right` chia sẻ cùng lưới timestamp từ quan sát đầu tiên đến cuối cùng. Pose cảnh dùng mốc giữa phơi sáng của camera trước làm tham chiếu, còn từng camera giữ hiệu chỉnh rolling shutter. Render lần lượt mỗi view ở độ phân giải gốc để giảm VRAM. Ba clip được ghép trái, giữa, phải vào một MP4 tối đa 3840 px ngang. Dashboard có một thanh tua chung và giữ vị trí khi chuyển xem riêng một camera. Metric độ chính xác dùng các mốc có quan sát cảm biến thật.
+
+### Thứ tự huấn luyện theo độ khó
+
+| Thứ tự | Cảnh | Quan sát ưu tiên trên ba camera trước |
+| --- | --- | --- |
+| 1 | `028` | Hai người đi bộ cách 7,9 m và 8,8 m ở `front_left`, frame 64 |
+| 2 | `011` | Nhiều người cùng xuất hiện, có silhouette vẽ tay ở `front_right`, frame 8 |
+| 3 | `008` | Người cách 30–33 m và bị che chân ở `front`, frame 16 và 46 |
+
+Thứ tự nằm trong [protocol/curriculum.json](protocol/curriculum.json). Colab đọc cảnh tiếp theo từ ZIP sau khi xử lý cảnh trước. Mỗi cảnh có checkpoint riêng và vẫn train RGB/LiDAR toàn cảnh. Các mốc SMPL đã duyệt đi vào monitor, còn quan sát bị che được xem bằng overlay và RGB trên vùng có vật che. Tổng hợp metric chuyển động chi chỉ dùng các quan sát đạt điều kiện hiển thị.
 
 ### Cảnh pilot đã khảo sát
 

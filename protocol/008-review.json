@@ -5,7 +5,8 @@
       "camera": "front",
       "frame": 46,
       "limbs_visible": false,
-      "note": "Bồn cây che chân, chỉ dùng quan sát toàn cảnh."
+      "pose_monitor": true,
+      "note": "Bồn cây che chân."
     },
     {
       "uuid": "dc748ba7-29dd-46aa-ac80-241aca339a6c",
@@ -19,6 +20,7 @@
       "camera": "front",
       "frame": 16,
       "limbs_visible": false,
+      "pose_monitor": true,
       "note": "Xe và lan can che chân."
     },
     {

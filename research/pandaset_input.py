@@ -59,6 +59,9 @@ def find_candidates(mounts, depth=5):
 
 
 def select_source(path, mounts, scenes):
+    if scenes != "all" and (isinstance(scenes, str) or not scenes
+                            or any(not SCENE_ID.fullmatch(scene) for scene in scenes)):
+        raise ValueError('SCENES must be a list of three-digit IDs or "all"')
     if path:
         root = Path(path).expanduser()
         if root.is_dir():
@@ -149,11 +152,13 @@ def check_scene(root, scene, cameras):
 
 
 def prepare_input(path, mounts, staging, scenes, cameras=FRONT_CAMERAS):
-    if scenes != "all" and (isinstance(scenes, str) or not scenes
-                            or any(not SCENE_ID.fullmatch(scene) for scene in scenes)):
-        raise ValueError('SCENES must be a list of three-digit IDs or "all"')
     source, selected = select_source(path, mounts, scenes)
-    root = source.resolve() if source.is_dir() else stage_archive(source, staging, selected)
-    for scene in selected:
+    return prepare_source(source, staging, selected, cameras), selected
+
+
+def prepare_source(source, staging, scenes, cameras=FRONT_CAMERAS):
+    """Stage and validate a batch from an already selected PandaSet source."""
+    root = source.resolve() if source.is_dir() else stage_archive(source, staging, scenes)
+    for scene in scenes:
         check_scene(root, scene, cameras)
-    return root, selected
+    return root
