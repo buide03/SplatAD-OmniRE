@@ -78,12 +78,12 @@ def projected_box(center, dimensions, yaw, camera, height, width):
     return [*lower.tolist(), *upper.tolist()] if np.all(upper > lower) else None
 
 
-def box_records(scene, frame):
+def box_records(scene, frame, labels=PEDESTRIANS):
     import pandas as pd
 
     data = pd.read_pickle(scene / "annotations" / "cuboids" / f"{frame:02d}.pkl.gz")
     for row in data.to_dict("records"):
-        if row["label"] in PEDESTRIANS and row["cuboids.sensor_id"] != 1:
+        if row["label"] in labels and row["cuboids.sensor_id"] != 1:
             yield row
 
 

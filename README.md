@@ -16,6 +16,12 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. R1/R2 cần bộ pose OmniRe tương ứng cho từng cảnh. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
 4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
 
+### PSNR và SSIM trong lúc train
+
+- **SplatAD gốc.** Notebook chạy mô hình SplatAD tại commit đã pin trước mỗi cấu hình nghiên cứu. Hai bên dùng cùng cảnh, camera, số bước và ngân sách seed phù hợp với Colab. SplatAD dùng thiết lập actor và refinement của mô hình gốc. R0 vẫn là cấu hình đối chứng số Gaussian cố định của repo.
+- **Bộ đo cố định.** Mặc định lấy 8 ảnh cách đều cho mỗi camera train. Điểm toàn cảnh được trung bình theo ảnh. Điểm xe và người được trung bình theo crop từ cuboid PandaSet đã chiếu lên ảnh. Crop mở rộng tối thiểu 64 × 64 px, nên có thể chứa nền hoặc vật che. Dashboard hiển thị số ảnh/crop và dùng cùng bộ đo cho mọi mốc.
+- **Hai mốc đối chiếu.** Lưu `initial.ckpt` trước lần cập nhật đầu tiên của run. Ghi `quality.json` ở bước 0, mỗi 250 lần cập nhật (50 với smoke) và bước cuối. Bảng hiển thị giá trị và chênh lệch so với SplatAD ở cùng bước, sau đó so với checkpoint đầu của run đang xem. Số liệu cập nhật khi Colab ghi mốc mới.
+
 Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
 
 Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_PUBLIC_POSES = False` cho cảnh cần chạy lại 4D-Humans. Nhánh này dùng đủ sáu camera và môi trường Python 3.10 riêng. [PandaSet](https://huggingface.co/datasets/georghess/pandaset) · [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)

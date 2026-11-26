@@ -22,6 +22,7 @@ from nerfstudio.scripts.train import main as launch
 from .model import POSE_GROUPS, PedestrianModelConfig
 from .pose_monitor import POSE_ATTRS, PoseMonitor, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
+from .quality import QualityHistory
 
 
 def append_jsonl(path, row):
@@ -36,6 +37,9 @@ class ResearchConfig(TrainerConfig):
     gradient_interval: int = 25
     pose_monitor_interval: int = 50
     pose_monitor_dir: Path | None = None
+    quality_set: Path | None = None
+    quality_dir: Path | None = None
+    quality_interval: int = 250
 
 
 class ResearchTrainer(Trainer):
@@ -58,13 +62,15 @@ class ResearchTrainer(Trainer):
         self.monitor_seconds = 0.0
         self.run_start = perf_counter()
         model = self.pipeline.model
-        dump_json(self.base_dir / "scene_routes.json", {
-            "background_seeds": model.background_seeds, "background_gaussians": model.background_gaussians,
-            "actors": model.actor_routes,
-        })
-        print(f"Background: {model.background_seeds:,} LiDAR seeds and {model.background_gaussians:,} Gaussians")
-        for row in model.actor_routes:
-            print(row)
+        self.native_baseline = type(model.config) is SplatADModelConfig
+        if not self.native_baseline:
+            dump_json(self.base_dir / "scene_routes.json", {
+                "background_seeds": model.background_seeds, "background_gaussians": model.background_gaussians,
+                "actors": model.actor_routes,
+            })
+            print(f"Background: {model.background_seeds:,} LiDAR seeds and {model.background_gaussians:,} Gaussians")
+            for row in model.actor_routes:
+                print(row)
         dump_json(self.base_dir / "environment.json", {
             "torch": torch.__version__, "torch_cuda": torch.version.cuda,
             "gpu": torch.cuda.get_device_name(), "seed": self.config.machine.seed,
@@ -75,8 +81,15 @@ class ResearchTrainer(Trainer):
         # A stats file may be newer than the checkpoint after an interruption.
         if self.previous and self.previous["step"] != self._start_step - 1:
             self.previous = {}
+        self.quality = None
+        if self.config.quality_set and self.config.quality_interval:
+            self.quality = QualityHistory(
+                self.config.quality_set, self.config.quality_dir or self.base_dir / "quality",
+                self.config.pipeline.datamanager.dataparser.sequence, getattr(model.config, "variant", "SplatAD"),
+                self.config.timestamp, self._start_step,
+            )
         self.pose_monitor = None
-        if self.config.pose_monitor_interval and model.people:
+        if self.config.pose_monitor_interval and not self.native_baseline and model.people:
             monitor = PoseMonitor(
                 self.pipeline, read_json(model.config.manifest_path),
                 self.config.pose_monitor_dir or self.base_dir / "pose_monitor",
@@ -91,6 +104,8 @@ class ResearchTrainer(Trainer):
         ])
 
     def train_iteration(self, step):
+        if self.native_baseline:
+            return super().train_iteration(step)
         model = self.pipeline.model
         sample = min(self.last_logged.get(sensor, -self.config.gradient_interval)
                      for sensor in ("rgb", "lidar")) <= step - self.config.gradient_interval
@@ -141,6 +156,8 @@ class ResearchTrainer(Trainer):
         return loss, losses, metrics
 
     def monitor(self, step):
+        if self.native_baseline:
+            return
         cfg = self.config
         elapsed_start = perf_counter()
         if cfg.pipeline.model.manifest_path is not None:
@@ -150,10 +167,29 @@ class ResearchTrainer(Trainer):
         self.monitor_seconds += perf_counter() - elapsed_start
 
     def initial_monitor(self, step):
+        if self.quality and step == self._start_step:
+            if step == 0:
+                self.save_initial_checkpoint()
+            self.record_quality(step)
         if step == 0 and self.config.monitor_interval:
             self.monitor(0)
         if self.pose_monitor and step == self._start_step and not self.pose_monitor.steps:
             self.record_pose_monitor(step)
+
+    def save_initial_checkpoint(self):
+        path = self.base_dir / "initial.ckpt"
+        temporary = path.with_suffix(".partial")
+        pipeline = getattr(self.pipeline, "module", self.pipeline)
+        torch.save({"step": -1, "pipeline": pipeline.state_dict(),
+                    "optimizers": {key: opt.state_dict() for key, opt in self.optimizers.optimizers.items()},
+                    "schedulers": {key: opt.state_dict() for key, opt in self.optimizers.schedulers.items()},
+                    "scalers": self.grad_scaler.state_dict()}, temporary)
+        temporary.replace(path)
+
+    def record_quality(self, step):
+        started = perf_counter()
+        self.quality.capture(self.pipeline, step)
+        self.monitor_seconds += perf_counter() - started
 
     def record_pose_monitor(self, step):
         if not self.pose_monitor or (self.pose_monitor.steps and self.pose_monitor.steps[-1]["step"] == step):
@@ -166,6 +202,8 @@ class ResearchTrainer(Trainer):
         self.monitor_seconds += perf_counter() - start
 
     def write_stats(self, step, seconds):
+        if self.native_baseline:
+            return
         prior_counts = Counter(self.previous.get("sensor_batches", {}))
         prior_counts.update(self.sensor_counts)
         train_seconds = round(self.previous.get("train_wall_s", 0) + seconds, 3)
@@ -176,6 +214,10 @@ class ResearchTrainer(Trainer):
         })
 
     def periodic_monitor(self, step):
+        completed = step + 1
+        last = self._start_step + self.config.max_num_iterations
+        if self.quality and (completed % self.config.quality_interval == 0 or completed == last):
+            self.record_quality(step + 1)
         interval = self.config.monitor_interval
         if interval and (step + 1) % interval == 0:
             self.monitor(step + 1)
@@ -185,6 +227,8 @@ class ResearchTrainer(Trainer):
             self.write_stats(step, perf_counter() - self.run_start - self.monitor_seconds)
 
     def final_monitor(self, step):
+        if self.quality:
+            self.record_quality(step + 1)
         if self.config.monitor_interval and (step + 1) % self.config.monitor_interval:
             self.monitor(step + 1)
         self.record_pose_monitor(step + 1)
@@ -213,29 +257,39 @@ def make_config(args):
     if args.pose_monitor_every is not None:
         config.pose_monitor_interval = args.pose_monitor_every
     config.pose_monitor_dir = args.pose_monitor_dir.resolve() if args.pose_monitor_dir else None
+    config.quality_set = args.quality_set.resolve() if args.quality_set else None
+    config.quality_dir = args.quality_dir.resolve() if args.quality_dir else None
+    if args.quality_every is not None:
+        config.quality_interval = args.quality_every
     model = {f.name: getattr(base.pipeline.model, f.name) for f in fields(SplatADModelConfig) if f.name != "_target"}
     manifest = args.manifest.resolve() if args.manifest else None
     if manifest:
         document = read_json(manifest)
         if document["scene_id"] != args.scene or not set(document["cameras"]) <= set(args.cameras):
             raise ValueError("Manifest scene and cameras must be included in this training run")
-    model.update(variant=args.variant, scene_id=args.scene,
-                 tracks_path=args.tracks.resolve() if args.tracks else None,
-                 body_path=args.body.resolve() if args.body else None,
-                 manifest_path=manifest, manifest_digest=sha256(manifest) if manifest else "",
-                 implementation="torch", n_far_points=float(args.far_points),
+    model.update(implementation="torch", n_far_points=float(args.far_points),
                  max_num_seed_points=args.seed_points, num_downscales=args.downscales,
-                 actor_flip_probability=0.0, max_steps=args.schedule_steps)
-    config.pipeline.model = PedestrianModelConfig(**model)
+                 max_steps=args.schedule_steps)
+    if args.variant == "SplatAD":
+        config.pipeline.model = SplatADModelConfig(**model)
+    else:
+        config.pipeline.model = PedestrianModelConfig(
+            **model, variant=args.variant, scene_id=args.scene,
+            tracks_path=args.tracks.resolve() if args.tracks else None,
+            body_path=args.body.resolve() if args.body else None,
+            manifest_path=manifest, manifest_digest=sha256(manifest) if manifest else "",
+        )
+        config.pipeline.model.actor_flip_probability = 0.0
     config.pipeline.calc_fid_steps = ()
     datamanager = config.pipeline.datamanager
     datamanager.cache_images = datamanager.cache_lidars = "cpu"
     datamanager.dataparser.data = args.raw.resolve()
     datamanager.dataparser.sequence = args.scene
     datamanager.dataparser.cameras = tuple(args.cameras)
-    datamanager.dataparser.include_deformable_actors = True
+    if args.variant != "SplatAD":
+        datamanager.dataparser.include_deformable_actors = True
     datamanager.dataparser.train_split_fraction = 1.0
-    if args.variant != "R0":
+    if args.variant in ("R1", "R2"):
         for name in ("means", "quats", "scales", "opacities", "features_dc", "features_rest"):
             config.optimizers[f"smpl_{name}"] = copy.deepcopy(config.optimizers[name])
     if args.variant == "R2":
@@ -248,7 +302,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", type=Path)
     parser.add_argument("--scene", default="011")
-    parser.add_argument("--variant", choices=("R0", "R1", "R2"), default="R2")
+    parser.add_argument("--variant", choices=("SplatAD", "R0", "R1", "R2"), default="R2")
     parser.add_argument("--tracks", type=Path)
     parser.add_argument("--body", type=Path)
     parser.add_argument("--manifest", type=Path)
@@ -261,6 +315,9 @@ def main():
     parser.add_argument("--gradient-every", type=int, default=25)
     parser.add_argument("--pose-monitor-every", type=int, help="RGB pose monitor interval, use 0 to disable")
     parser.add_argument("--pose-monitor-dir", type=Path, help="Dashboard artifact folder for live SMPL monitoring")
+    parser.add_argument("--quality-set", type=Path, help="Frozen RGB examples shared with the SplatAD baseline")
+    parser.add_argument("--quality-dir", type=Path, help="Dashboard artifact folder for live PSNR and SSIM")
+    parser.add_argument("--quality-every", type=int, help="Optimizer steps between RGB measurements, use 0 to disable")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--seed-points", type=int, default=250000)
     parser.add_argument("--far-points", type=int, default=80000)
@@ -275,6 +332,8 @@ def main():
         parser.error("Invalid step intervals")
     if args.pose_monitor_every is not None and args.pose_monitor_every < 0:
         parser.error("The pose monitor interval must be nonnegative")
+    if args.quality_every is not None and args.quality_every < 0:
+        parser.error("The RGB quality interval must be nonnegative")
     if args.resume:
         if not args.checkpoint:
             parser.error("--resume requires --checkpoint")
@@ -288,8 +347,14 @@ def main():
             config.pose_monitor_interval = args.pose_monitor_every
         if args.pose_monitor_dir:
             config.pose_monitor_dir = args.pose_monitor_dir.resolve()
+        if args.quality_set:
+            config.quality_set = args.quality_set.resolve()
+        if args.quality_dir:
+            config.quality_dir = args.quality_dir.resolve()
+        if args.quality_every is not None:
+            config.quality_interval = args.quality_every
     else:
-        if args.raw is None or (args.variant != "R0" and not all((args.tracks, args.body, args.manifest))):
+        if args.raw is None or (args.variant in ("R1", "R2") and not all((args.tracks, args.body, args.manifest))):
             parser.error("Supply --raw and, for R1/R2, --tracks, --body and --manifest")
         config = make_config(args)
         existing = config.get_checkpoint_dir()

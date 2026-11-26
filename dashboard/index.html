@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
   <script src="/pose-monitor.js" defer></script>
+  <script src="/quality-monitor.js" defer></script>
 </head>
 <body>
   <header class="top">
@@ -56,6 +57,26 @@
               <span aria-hidden="true">⛶</span>
             </button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="quality-monitor" class="pose-section" aria-labelledby="quality-title">
+      <div class="section-head">
+        <h2 id="quality-title">PSNR và SSIM</h2>
+        <label class="inline-label" id="quality-step-label" hidden>Bước
+          <select id="quality-step" aria-label="Chọn bước đo PSNR và SSIM"></select>
+        </label>
+      </div>
+      <p id="quality-status" class="empty-note" role="status">Đang tải số liệu RGB…</p>
+      <div class="quality-results" id="quality-results" hidden>
+        <p id="quality-detail" class="subtle"></p>
+        <div class="quality-table" role="region" aria-label="Đối chiếu PSNR và SSIM" tabindex="0">
+          <table id="quality-values">
+            <thead><tr><th>Phạm vi</th><th>Chỉ số</th><th>Hiện tại</th>
+              <th title="Cùng số lần cập nhật">SplatAD gốc</th>
+              <th title="Trước lần cập nhật đầu tiên">Checkpoint đầu</th></tr></thead>
+          </table>
         </div>
       </div>
     </section>

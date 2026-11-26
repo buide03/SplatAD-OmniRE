@@ -79,6 +79,17 @@ input[type="range"] { flex: 1; min-width: 22px; margin: 0; accent-color: var(--a
 .pose-section { margin-top: 34px }
 .pose-section h2 { font-size: clamp(1.35rem, 2.5vw, 1.8rem); letter-spacing: -.045em }
 .empty-note { padding: 16px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 14px }
+.quality-results { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden }
+.quality-results > p { padding: 10px 13px }
+.quality-table { overflow-x: auto }
+.quality-table th, .quality-table td { padding: 9px 13px }
+.quality-table th[scope="rowgroup"] { position: static; background: var(--surface); color: var(--ink); vertical-align: top }
+.quality-table tbody:last-child tr:last-child > * { border-bottom: 0 }
+.quality-table .quality-current { color: var(--accent); font-weight: 700 }
+.quality-delta { display: block; color: var(--muted); font-size: 12px; line-height: 1.5 }
+.quality-delta.gain { color: #12604a }
+.quality-delta.drop { color: #9e3826 }
+.quality-count { color: var(--muted); display: block; font-weight: 500; margin-top: 2px }
 .metric-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--surface); border-radius: 12px; margin: 0 0 13px }
 .metric-list > div { padding: 14px 16px; min-width: 0 }
 .metric-list > div + div { border-inline-start: 1px solid var(--line) }

@@ -48,11 +48,19 @@ def crop_bounds(box, height, width, minimum=64):
     return left, top, right, bottom
 
 
+def rgb_batch(image):
+    return image.clamp(0, 1).permute(2, 0, 1)[None].contiguous()
+
+
+def psnr_ssim(a, b, ssim):
+    mse = (a - b).square().mean()
+    return {"psnr_db": -10 * mse.clamp_min(1e-12).log10(), "ssim": ssim(a, b)}
+
+
 def rgb_scores(pred, gt, lpips, ssim):
-    a, b = (t.clamp(0, 1).permute(2, 0, 1)[None].contiguous() for t in (pred, gt))
-    diff = a - b
-    return {"mae": float(diff.abs().mean()), "psnr_db": float(-10 * diff.square().mean().clamp_min(1e-12).log10()),
-            "ssim": float(ssim(a, b)), "lpips": float(lpips(a, b))}
+    a, b = rgb_batch(pred), rgb_batch(gt)
+    scores = {metric: float(value) for metric, value in psnr_ssim(a, b, ssim).items()}
+    return {**scores, "mae": float((a - b).abs().mean()), "lpips": float(lpips(a, b))}
 
 
 def to_image(image):

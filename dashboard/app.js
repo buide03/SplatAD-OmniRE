@@ -182,7 +182,8 @@ function drawScene(position) {
     tab.tabIndex = active ? 0 : -1;
     if (active) videoPanel.setAttribute("aria-labelledby", tab.id);
   }
-  sceneMedia = {source, render, monitors: runs.filter(run => run.mode === "pose_monitor")};
+  sceneMedia = {source, render, monitors: runs.filter(run => run.mode === "pose_monitor"),
+    quality: runs.filter(run => run.mode === "rgb_quality")};
   showVideo(sceneMedia[state.mode], position);
   window.dispatchEvent(new CustomEvent("splatad:scene", {detail: sceneMedia}));
 }
