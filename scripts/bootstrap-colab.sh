@@ -53,27 +53,58 @@ if ! command -v uv >/dev/null; then
 fi
 
 # Match the PyTorch wheel to the CUDA headers and nvcc used by the JIT kernels.
+select_cuda_toolkit() {
+    local candidate version
+    for candidate in "${CUDA_HOME:-}" /usr/local/cuda-12.8 /usr/local/cuda-12.6 /usr/local/cuda; do
+        [[ -n "$candidate" && -x "$candidate/bin/nvcc" ]] || continue
+        version="$("$candidate/bin/nvcc" --version)" || continue
+        case "$version" in
+            *"release 12.8,"*) cuda_tag=cu128 ;;
+            *"release 12.6,"*) cuda_tag=cu126 ;;
+            *) continue ;;
+        esac
+        cuda_home="$candidate"
+        return 0
+    done
+    return 1
+}
+
+install_colab_cuda_toolkit() (
+    # Only provision system packages inside the Colab VM.
+    if [[ "$EUID" -ne 0 || ! -d /content || "$(uname -m)" != "x86_64" ]]; then
+        echo "Set CUDA_HOME to an installed CUDA 12.8 or 12.6 toolkit." >&2
+        exit 1
+    fi
+    source /etc/os-release
+    if [[ "$ID" != ubuntu || "$VERSION_ID" != 22.04 && "$VERSION_ID" != 24.04 ]]; then
+        echo "Automatic CUDA installation requires an Ubuntu 22.04 or 24.04 Colab runtime." >&2
+        exit 1
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    echo "Installing CUDA 12.8 compiler and development libraries for PyTorch cu128."
+    if ! apt-cache show cuda-compiler-12-8 >/dev/null 2>&1; then
+        keyring="$(mktemp -d)"
+        trap 'rm -f "$keyring/cuda-keyring.deb"; rmdir "$keyring"' EXIT
+        curl --fail --silent --show-error --location --retry 3 \
+            "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${VERSION_ID//./}/x86_64/cuda-keyring_1.1-1_all.deb" \
+            --output "$keyring/cuda-keyring.deb"
+        dpkg -i "$keyring/cuda-keyring.deb"
+    fi
+    apt-get -qq update
+    apt-get -y --no-install-recommends install cuda-compiler-12-8 cuda-libraries-dev-12-8
+)
+
 cuda_home=""
 cuda_tag=""
 if [[ "$profile" != "convert" ]]; then
-    cuda_home="${CUDA_HOME:-/usr/local/cuda}"
-    if [[ -z "${CUDA_HOME:-}" ]]; then
-        for candidate in /usr/local/cuda-12.8 /usr/local/cuda-12.6; do
-            if [[ -x "$candidate/bin/nvcc" ]]; then
-                cuda_home="$candidate"
-                break
-            fi
-        done
+    if ! select_cuda_toolkit; then
+        install_colab_cuda_toolkit
+        if ! select_cuda_toolkit; then
+            echo "CUDA 12.8 was installed but its nvcc could not be located." >&2
+            exit 1
+        fi
     fi
-    if [[ ! -x "$cuda_home/bin/nvcc" ]]; then
-        echo "Set CUDA_HOME to a CUDA 12.8 or 12.6 toolkit that provides nvcc." >&2
-        exit 1
-    fi
-    case "$("$cuda_home/bin/nvcc" --version)" in
-        *"release 12.8,"*) cuda_tag=cu128 ;;
-        *"release 12.6,"*) cuda_tag=cu126 ;;
-        *) echo "This profile supports CUDA 12.6 and 12.8. Set CUDA_HOME." >&2; exit 1 ;;
-    esac
+    echo "Using CUDA toolkit $cuda_home ($cuda_tag)."
     export CUDA_HOME="$cuda_home" PATH="$cuda_home/bin:$PATH"
 fi
 export MAX_JOBS="${MAX_JOBS:-2}"
