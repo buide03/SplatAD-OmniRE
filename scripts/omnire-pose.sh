@@ -16,9 +16,11 @@ if [[ ! "$scene" =~ ^[0-9]{3}$ || ! -f "$smpl" ]]; then
 fi
 source "$repo/.deps/pose-env/activate-research"
 cd "$repo/.deps/omnire"
-if ! git apply --reverse --check "$repo/omnire-tracker-memory.patch" 2>/dev/null; then
-    git apply "$repo/omnire-tracker-memory.patch"
-fi
+for patch in "$repo/omnire-tracker-memory.patch" "$repo/omnire-headless-preview.patch"; do
+    if ! git apply --reverse --check "$patch" 2>/dev/null; then
+        git apply "$patch"
+    fi
+done
 mkdir -p smpl_models
 ln -sfn "$smpl" smpl_models/SMPL_NEUTRAL.pkl
 hmr_cache="$(python -c 'from third_party.Humans4D.hmr2.configs import CACHE_DIR_4DHUMANS; print(CACHE_DIR_4DHUMANS)')"

@@ -1,0 +1,19 @@
+diff --git a/datasets/tools/extract_smpl.py b/datasets/tools/extract_smpl.py
+--- a/datasets/tools/extract_smpl.py
++++ b/datasets/tools/extract_smpl.py
+@@ -149,4 +149,8 @@
+         super().__init__(cfg)
+ 
++    def setup_visualizer(self):
++        if self.cfg.render.enable:
++            super().setup_visualizer()
++
+     def setup_hmr(self):
+         self.HMAR = HMR2023TextureSampler(self.cfg)
+@@ -214,4 +218,6 @@
+         
+         cfg = initialize_config()
++        # PHALP exports masks, SMPL poses, and track IDs without preview video.
++        cfg.render.enable = verbose
+         
+         cached_video_path = os.path.join(temp_dir, 'raw_videos', f'{cam_id}.mp4')
