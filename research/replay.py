@@ -100,6 +100,8 @@ def render_camera(model, camera_name, track, output, timeline, scale, crf, ffmpe
     return {
         **timeline.video_metadata(path, width + width % 2, height + height % 2),
         "camera": camera_name,
+        "scale": scale,
+        "crf": crf,
         "render_fps": frame_count / max(elapsed_gpu, 1e-6),
         "export_fps": frame_count / max(perf_counter() - started, 1e-6),
         "source_fps": (len(times) - 1) / (times[-1] - times[0]),
@@ -155,12 +157,21 @@ def main():
     front_clock = Timeline.from_tracks([tracks[name][2] for name in FRONT_CAMERAS], args.fps) if synchronized else None
     with torch.inference_mode():
         center_offset = camera_center_offset(pipeline.model, tracks["front"][1][0]) if synchronized else None
-    if any(name in FRONT_CAMERAS for name in cameras) and record.pop("front_triptych", None):
-        dump_json(metadata_path, record)
     videos = {v["camera"]: v for v in record["videos"]}
     for camera in cameras:
         front_view = synchronized and camera in FRONT_CAMERAS
         clock = front_clock if front_view else Timeline.from_tracks([tracks[camera][2]], args.fps)
+        cached = videos.get(camera)
+        view = tracks[camera][1][0]
+        width, height = int((view.width * args.scale).item()), int((view.height * args.scale).item())
+        if cached and cached.get("scale", 1) == args.scale and cached.get("crf", 16) == args.crf:
+            expected = clock.video_metadata(cached["file"], width + width % 2, height + height % 2)
+            video = args.output / cached["file"]
+            if all(cached.get(key) == value for key, value in expected.items()) and video.is_file() and video.stat().st_size:
+                print(f"Reusing {video}", flush=True)
+                continue
+        if camera in FRONT_CAMERAS and record.pop("front_triptych", None):
+            dump_json(metadata_path, record)
         videos[camera] = render_camera(pipeline.model, camera, tracks[camera], args.output, clock,
                                        args.scale, args.crf, ffmpeg, center_offset if front_view else None,
                                        interpolation=args.interpolation)
@@ -169,7 +180,9 @@ def main():
         stats = videos[camera]
         print(f"{camera}: {stats['fps']} FPS playback, {stats['render_fps']:.1f} FPS GPU render, "
               f"{stats['export_fps']:.1f} FPS including encoding", flush=True)
-    if synchronized:
+    triptych = record.get("front_triptych")
+    if synchronized and (not triptych or not (args.output / triptych["file"]).is_file()
+                         or not (args.output / triptych["file"]).stat().st_size):
         record["front_triptych"] = combine_front(ffmpeg, args.output, videos, args.crf)
         dump_json(metadata_path, record)
         print(f"Three synchronized views: {args.output / record['front_triptych']['file']}", flush=True)

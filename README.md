@@ -16,6 +16,14 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước. Tất cả các preset train RGB ở độ phân giải gốc từ bước 0. Các run Colab có `fullres` trong tên thư mục checkpoint.
 4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Trong `MyDrive/SplatAD+OmniRe/`, `inputs/` và `pose-init/` chứa dữ liệu đã chuẩn bị, `runs/` chứa checkpoint, `artifacts/` chứa video, monitor và metric.
 
+### Khôi phục trên Colab
+
+Sau khi Colab ngắt, mở lại notebook với cùng `STAGE`, danh sách cảnh và cấu hình run. Notebook kiểm tra môi trường, dùng lại pose và manifest đã lưu, rồi tiếp tục từ checkpoint hoàn chỉnh mới nhất của từng cảnh và biến thể. Những cảnh đã có checkpoint đủ bước và video được bỏ qua. Colab giải nén lại cảnh còn dở nếu runtime mới đã mất bộ nhớ đệm cục bộ.
+
+- **Checkpoint.** Colab lưu theo chu kỳ 100 bước và ở bước cuối. Khi nhận tín hiệu dừng, trainer thử lưu ở cuối bước cập nhật hiện tại. Nếu runtime bị tắt ngay, lượt sau dùng checkpoint đã ghi xong gần nhất. File `.partial` và checkpoint ZIP bị cắt dở được bỏ qua.
+- **Lỗi thư viện.** Notebook kiểm tra môi trường tách riêng cho train, 4D-Humans và chuyển SMPL. Nếu lệnh gặp lỗi import hoặc lỗi extension đã nhận diện, notebook dựng lại môi trường liên quan và thử một lần. Lượt train đọc lại checkpoint trước lần thử lại.
+- **Tra lỗi.** `artifacts/<run_id>/progress/progress.json` ghi trạng thái và lần thử của từng giai đoạn. Các file `*.log` cùng thư mục ghi lệnh, output và lỗi. Khi lỗi vẫn còn, mở log của giai đoạn báo lỗi rồi chạy lại notebook sau khi sửa nguyên nhân.
+
 ### PSNR và SSIM trong lúc train
 
 - **SplatAD gốc.** Notebook chạy mô hình SplatAD tại commit đã pin trước mỗi cấu hình nghiên cứu. Hai bên dùng cùng cảnh, camera, số bước và ngân sách seed phù hợp với Colab. SplatAD dùng thiết lập actor và refinement của mô hình gốc. R0 vẫn là cấu hình đối chứng số Gaussian cố định của repo.

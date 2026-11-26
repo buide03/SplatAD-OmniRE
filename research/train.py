@@ -3,6 +3,7 @@ import argparse
 import copy
 import json
 import os
+import signal
 from collections import Counter
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -19,6 +20,7 @@ from nerfstudio.engine.trainer import Trainer, TrainerConfig
 from nerfstudio.models.splatad import SplatADModelConfig
 from nerfstudio.scripts.train import main as launch
 
+from .colab import complete_checkpoint
 from .model import POSE_GROUPS, PedestrianModelConfig
 from .pose_monitor import POSE_ATTRS, PoseMonitor, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
@@ -41,8 +43,30 @@ class ResearchConfig(TrainerConfig):
     quality_dir: Path | None = None
     quality_interval: int = 250
 
+    def save_config(self):
+        path = self.get_base_dir() / "config.yml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".partial")
+        temporary.write_text(yaml.dump(self), encoding="utf-8")
+        temporary.replace(path)
+        print(f"Saved config to {path}", flush=True)
+
 
 class ResearchTrainer(Trainer):
+    def train(self):
+        self.stop_signal = None
+
+        def request_stop(signum, _frame):
+            self.stop_signal = signum
+
+        signals = (signal.SIGINT, signal.SIGTERM)
+        previous = {signum: signal.signal(signum, request_stop) for signum in signals}
+        try:
+            super().train()
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
     def setup(self, *args, **kwargs):
         super().setup(*args, **kwargs)
         log = self.base_dir / "training.jsonl"
@@ -214,6 +238,10 @@ class ResearchTrainer(Trainer):
         })
 
     def periodic_monitor(self, step):
+        if self.stop_signal is not None:
+            self.save_checkpoint(step)
+            print(f"Interrupted after {step + 1} steps. Checkpoint saved in {self.checkpoint_dir}.", flush=True)
+            raise SystemExit(128 + self.stop_signal)
         completed = step + 1
         last = self._start_step + self.config.max_num_iterations
         if self.quality and (completed % self.config.quality_interval == 0 or completed == last):
@@ -244,7 +272,7 @@ def make_config(args):
     config.output_dir = args.output.resolve()
     config.timestamp = args.run_id
     config.max_num_iterations = args.steps
-    config.steps_per_save = args.checkpoint_every
+    config.steps_per_save = args.checkpoint_every if args.checkpoint_every is not None else 250
     config.steps_per_eval_batch = config.steps_per_eval_image = config.steps_per_eval_all_images = 0
     config.save_only_latest_checkpoint = False
     config.vis = "tensorboard"
@@ -310,7 +338,7 @@ def main():
     parser.add_argument("--run-id", default="{timestamp}")
     parser.add_argument("--steps", type=int, default=200, help="Number of iterations to execute in this session")
     parser.add_argument("--schedule-steps", type=int, default=30001)
-    parser.add_argument("--checkpoint-every", type=int, default=250)
+    parser.add_argument("--checkpoint-every", type=int, help="Checkpoint interval. New runs default to 250 steps.")
     parser.add_argument("--monitor-every", type=int, default=250)
     parser.add_argument("--gradient-every", type=int, default=25)
     parser.add_argument("--pose-monitor-every", type=int, help="RGB pose monitor interval, use 0 to disable")
@@ -329,7 +357,8 @@ def main():
     args = parser.parse_args()
     if not torch.cuda.is_available():
         parser.error("A CUDA GPU is required. In Colab select a GPU runtime and run bootstrap first.")
-    if args.steps < 1 or args.gradient_every < 1 or args.monitor_every < 0 or args.checkpoint_every < 1:
+    if (args.steps < 1 or args.gradient_every < 1 or args.monitor_every < 0
+            or (args.checkpoint_every is not None and args.checkpoint_every < 1)):
         parser.error("Invalid step intervals")
     if args.pose_monitor_every is not None and args.pose_monitor_every < 0:
         parser.error("The pose monitor interval must be nonnegative")
@@ -344,6 +373,10 @@ def main():
         config.load_dir = None
         config.load_checkpoint = args.checkpoint.resolve()
         config.max_num_iterations = args.steps
+        if args.raw is not None:
+            config.pipeline.datamanager.dataparser.data = args.raw.resolve()
+        if args.checkpoint_every is not None:
+            config.steps_per_save = args.checkpoint_every
         if args.pose_monitor_every is not None:
             config.pose_monitor_interval = args.pose_monitor_every
         if args.pose_monitor_dir:
@@ -359,7 +392,7 @@ def main():
             parser.error("Supply --raw and, for R1/R2, --tracks, --body and --manifest")
         config = make_config(args)
         existing = config.get_checkpoint_dir()
-        if config.timestamp != "{timestamp}" and any(existing.glob("step-*.ckpt")):
+        if config.timestamp != "{timestamp}" and any(complete_checkpoint(path) for path in existing.glob("step-*.ckpt")):
             parser.error("Run ID already exists. Use --resume or choose another --run-id")
     os.environ.setdefault("WANDB_MODE", "disabled")
     launch(config)

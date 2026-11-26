@@ -169,7 +169,10 @@ def prepare_smpl(args):
         value = source[name]
         arrays[name] = np.asarray(value.toarray() if hasattr(value, "toarray") else value)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.output, **arrays, parents=parents, smpl_version=args.model_version)
+    temporary = args.output.with_suffix(".partial")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(handle, **arrays, parents=parents, smpl_version=args.model_version)
+    temporary.replace(args.output)
 
 
 def export_tracks(args):
