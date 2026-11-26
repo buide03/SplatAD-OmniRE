@@ -2,7 +2,7 @@
   const input = byId("quality-step");
   const status = byId("quality-status");
   const view = byId("quality-results");
-  const scopes = {scene: "Toàn cảnh", vehicle: "Xe cộ", person: "Con người"};
+  const scopes = {person: "Người đi bộ", scene: "Toàn cảnh", vehicle: "Xe cộ"};
   const metrics = [["PSNR (dB)", "psnr_db", 2], ["SSIM", "ssim", 4]];
   let current;
   let baseline;
