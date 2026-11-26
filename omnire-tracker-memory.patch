@@ -1,0 +1,38 @@
+diff --git a/datasets/tools/extract_smpl.py b/datasets/tools/extract_smpl.py
+--- a/datasets/tools/extract_smpl.py
++++ b/datasets/tools/extract_smpl.py
+@@ -1,2 +1,3 @@
++import gc
+ import os
+ import warnings
+@@ -151,4 +152,9 @@
+     def setup_hmr(self):
+         self.HMAR = HMR2023TextureSampler(self.cfg)
++
++    def setup_detectron2_with_RPN(self):
++        # PandaSet supplies RGB videos to PHALP. Its cuboids are matched afterwards.
++        if self.cfg.use_gt:
++            super().setup_detectron2_with_RPN()
+ 
+     def get_detections(self, image, frame_name, t_, additional_data=None, measurments=None):
+@@ -237,9 +243,15 @@
+         cfg.video.output_dir = output_dir
+ 
+-        phalp_tracker = HMR2_4dhuman(cfg)
+-        phalp_tracker.track()
+-        
+-        # reset global hydra
+-        GlobalHydra.instance().clear()
++        phalp_tracker = None
++        try:
++            phalp_tracker = HMR2_4dhuman(cfg)
++            if phalp_tracker.track() is None:
++                raise RuntimeError(f"4D-Humans stopped on camera {cam_id}; see the tracker traceback above.")
++        finally:
++            # Trackers can form reference cycles and otherwise overlap on the GPU.
++            del phalp_tracker
++            gc.collect()
++            torch.cuda.empty_cache()
++            GlobalHydra.instance().clear()
+     
+     # remove temporary or useless files

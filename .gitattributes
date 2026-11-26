@@ -2,3 +2,4 @@
 *.ipynb text eol=lf
 *.patch text eol=lf
 splatad.patch whitespace=-blank-at-eol
+omnire-tracker-memory.patch whitespace=-blank-at-eol
