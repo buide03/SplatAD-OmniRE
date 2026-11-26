@@ -23,6 +23,7 @@ class PedestrianModelConfig(SplatADModelConfig):
     manifest_path: Path | None = None
     body_path: Path | None = None
     manifest_digest: str = ""
+    smpl_init_opacity: float = 0.99
 
 
 class PedestrianModel(SplatADModel):
@@ -55,6 +56,8 @@ class PedestrianModel(SplatADModel):
             raise ValueError("The frozen observation manifest changed after the run was configured")
         if cfg.variant == "R0":
             return
+        if not 0.0 < cfg.smpl_init_opacity < 1.0:
+            raise ValueError("SMPL initial opacity must be between 0 and 1")
         manifest = read_json(cfg.manifest_path)
         document = validate_tracks(read_json(cfg.tracks_path), cfg.scene_id)
         if sha256(cfg.tracks_path) != manifest["tracks_sha256"] or sha256(cfg.body_path) != document["body_sha256"]:
@@ -77,7 +80,9 @@ class PedestrianModel(SplatADModel):
                 torch.random.default_generator.manual_seed(torch.initial_seed() + index)
                 self.people.append(SMPLTrack(
                     track, body, metadata["scene_from_world"], metadata["scene_time_offset"],
-                    cfg.feature_dim, cfg.init_opacities, cfg.variant == "R2",
+                    feature_dim=cfg.feature_dim,
+                    opacity=cfg.smpl_init_opacity,
+                    optimize=cfg.variant == "R2",
                 ))
             replaced.append(index)
             route = self.actor_routes[index]
