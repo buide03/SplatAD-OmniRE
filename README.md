@@ -11,10 +11,10 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 
 ### Bắt đầu trên Colab
 
-1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` cho tự dò trong My Drive và Shared Drives, hoặc nhập đường dẫn như `/content/drive/MyDrive/datasets/pandaset` hay `/content/drive/MyDrive/pandaset.zip`. Thư mục đã giải nén được đọc trực tiếp. Với ZIP, Colab giải nén các scene đã chọn vào `/content/pandaset-from-drive`. Notebook kiểm tra đủ 80 ảnh mỗi camera đã chọn, scan LiDAR và cuboid của scene.
-2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt file Neutral có giấy phép tại đường dẫn `SMPL_PICKLE`. Mặc định dùng v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
+1. Đặt `pandaset.zip` trong `MyDrive/SplatAD+OmniRe/`, mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` để ưu tiên ZIP trong thư mục dự án, rồi tự dò My Drive và Shared Drives nếu ZIP này vắng. Có thể chỉ định ZIP khác hoặc thư mục đã giải nén trong `PANDASET_PATH`. Colab giải nén tạm các cảnh đã chọn vào `/content/pandaset-from-drive` và kiểm tra ảnh, scan LiDAR và cuboid của cảnh.
+2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt file Neutral có giấy phép tại đường dẫn `SMPL_PICKLE`. Mặc định dùng v1.1 tại `MyDrive/SplatAD+OmniRe/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
 3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
-4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
+4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Trong `MyDrive/SplatAD+OmniRe/`, `inputs/` và `pose-init/` chứa dữ liệu đã chuẩn bị, `runs/` chứa checkpoint, `artifacts/` chứa video, monitor và metric.
 
 ### PSNR và SSIM trong lúc train
 
@@ -26,7 +26,7 @@ Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit
 
 ### Khởi tạo SMPL và lưu Drive
 
-4D-Humans chạy trên sáu camera trong môi trường Python 3.10. Tracklet Matching và Pose Completion giữ trong pipeline của OmniRe. Kết quả cho mỗi cảnh được lưu vào thư mục `MyDrive/SplatAD-OmniRE/pose-init/`, trong nhánh theo phiên bản và mã băm của file SMPL Neutral. [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
+4D-Humans chạy trên sáu camera trong môi trường Python 3.10. Tracklet Matching và Pose Completion giữ trong pipeline của OmniRe. Kết quả cho mỗi cảnh được lưu vào thư mục `MyDrive/SplatAD+OmniRe/pose-init/`, trong nhánh theo phiên bản và mã băm của file SMPL Neutral. [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
 
 - `OMNIRE_REFERENCE="fill"` là mặc định. Đối chiếu cùng UUID và frame, bù mốc còn trống trên track 4D-Humans khi bản công bố có pose hợp lệ. Khi shape của hai nguồn khác nhau, căn lại mesh theo shape 4D-Humans để giữ tâm cuboid. Cảnh ngoài bộ OmniRe dùng kết quả 4D-Humans.
 - `"compare"` ghi chênh lệch tịnh tiến, góc xoay gốc và góc xoay khớp trên các mốc chung. `"off"` chỉ chạy 4D-Humans.
