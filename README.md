@@ -1,6 +1,6 @@
 # SplatAD / OmniRE trên PandaSet
 
-Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng cảnh. PandaSet cung cấp RGB, LiDAR và cuboid theo UUID. OmniRe/4D-Humans khởi tạo pose. SplatAD giữ renderer RGB, renderer LiDAR và công thức loss để đối chiếu ba cấu hình.
+Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng cảnh. PandaSet cung cấp RGB, LiDAR và cuboid theo UUID. 4D-Humans khởi tạo pose qua pipeline matching và completion của OmniRe. SplatAD giữ renderer RGB, renderer LiDAR và công thức loss để đối chiếu ba cấu hình.
 
 | Cấu hình | Biểu diễn người đi bộ | Tối ưu |
 | --- | --- | --- |
@@ -12,8 +12,8 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 ### Bắt đầu trên Colab
 
 1. Mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` cho tự dò trong My Drive và Shared Drives, hoặc nhập đường dẫn như `/content/drive/MyDrive/datasets/pandaset` hay `/content/drive/MyDrive/pandaset.zip`. Thư mục đã giải nén được đọc trực tiếp. Với ZIP, Colab giải nén các scene đã chọn vào `/content/pandaset-from-drive`. Notebook kiểm tra đủ 80 ảnh mỗi camera đã chọn, scan LiDAR và cuboid của scene.
-2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt `SMPL_PICKLE` và `MODEL_VERSION` theo file Neutral đã có trên Drive. Notebook GitHub mặc định dùng v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
-3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. R1/R2 cần bộ pose OmniRe tương ứng cho từng cảnh. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
+2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt file Neutral có giấy phép tại đường dẫn `SMPL_PICKLE`. Mặc định dùng v1.1 tại `MyDrive/SplatAD-OmniRE/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
+3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
 4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Checkpoint, monitor, metric và video lưu dưới `MyDrive/SplatAD-OmniRE/`.
 
 ### PSNR và SSIM trong lúc train
@@ -24,7 +24,13 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 
 Bootstrap pin Python 3.12, PyTorch 2.7.1, CUDA toolkit 12.8/12.6 và các commit trong [versions.json](versions.json). Lần render đầu JIT-build fork GSplat. Đặt `CUDA_HOME` tới toolkit tương ứng nếu máy có nhiều bản CUDA. Giảm `--seed-points`, `--far-points` hoặc train ít camera hơn nếu GPU Colab thiếu VRAM. Dùng cùng các giá trị khi so sánh. [Mã nguồn SplatAD](https://github.com/georghess/neurad-studio/tree/aea389a936890eb48e1b43a493a52c0194559b48)
 
-Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_PUBLIC_POSES = False` cho cảnh cần chạy lại 4D-Humans. Nhánh này dùng đủ sáu camera và môi trường Python 3.10 riêng. [PandaSet](https://huggingface.co/datasets/georghess/pandaset) · [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
+### Khởi tạo SMPL và lưu Drive
+
+4D-Humans chạy trên sáu camera trong môi trường Python 3.10. Tracklet Matching và Pose Completion giữ trong pipeline của OmniRe. Kết quả cho mỗi cảnh được lưu vào thư mục `MyDrive/SplatAD-OmniRE/pose-init/`, trong nhánh theo phiên bản và mã băm của file SMPL Neutral. [Chuẩn bị pose OmniRe](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/docs/HumanPose.md)
+
+- `OMNIRE_REFERENCE="fill"` là mặc định. Đối chiếu cùng UUID và frame, bù mốc còn trống trên track 4D-Humans khi bản công bố có pose hợp lệ. Khi shape của hai nguồn khác nhau, căn lại mesh theo shape 4D-Humans để giữ tâm cuboid. Cảnh ngoài bộ OmniRe dùng kết quả 4D-Humans.
+- `"compare"` ghi chênh lệch tịnh tiến, góc xoay gốc và góc xoay khớp trên các mốc chung. `"off"` chỉ chạy 4D-Humans.
+- Drive lưu `smpl.pkl` của lần chạy 4D-Humans, JSON của từng nguồn, `tracks.json` dùng để train, manifest và `comparison.json` ghi nguồn, số mốc đã bù và độ chênh pose. Độ chênh hai nguồn là số liệu đối chiếu.
 
 ### Quy ước và số liệu
 
@@ -63,7 +69,7 @@ Số liệu lấy từ sáu camera, pose OmniRe công khai và SMPL Neutral v1.0
 - **RGB vùng người.** Monitor tính L1/MAE từ ảnh toàn cảnh đã render trên cùng mask người hoặc crop bbox cố định. So sánh qua các mốc bằng cột `RGB MAE`. Đây là chỉ số theo dõi vùng người. Loss train tiếp tục lấy từ cấu hình SplatAD toàn cảnh.
 - **Probe gradient R2.** Tính gradient từ loss RGB toàn cảnh của cùng một ảnh, thử một bước Adam mới với learning rate hiện hành và chỉ đổi các hàng pose đang hoạt động của UUID này. Monitor đo lại loss, RGB MAE và mesh IoU sau bước thử rồi khôi phục pose. Bảng cập nhật train thật ghi riêng norm gradient và dịch chuyển tham số khi batch train lấy đúng ảnh đó. IoU tăng hoặc lỗi điểm chiếu giảm mới là dấu hiệu mesh sát ảnh hơn.
 
-Cảnh `011/front_right` có một silhouette gần được vẽ tay tại frame 8 trong [protocol/011-review.json](protocol/011-review.json). Với quan sát khác, dùng `pose_monitor: true` trong tệp review để chọn frame theo dõi và `silhouette_xy` để khai báo polygon theo tọa độ pixel ảnh gốc. Dashboard tự đọc `monitor.json` và ảnh theo mốc từ thư mục `artifacts/<run_id>/<scene>-<variant>-pose`. Smoke ghi mốc 0, mỗi 50 bước và bước cuối. Khi resume run cũ, giữ `RUN_ID` và `PREP_TAG` cũ để dùng đúng manifest.
+Cảnh `011/front_right` có một silhouette gần được vẽ tay tại frame 8 trong [protocol/011-review.json](protocol/011-review.json). Với quan sát khác, dùng `pose_monitor: true` trong tệp review để chọn frame theo dõi và `silhouette_xy` để khai báo polygon theo tọa độ pixel ảnh gốc. Dashboard tự đọc `monitor.json` và ảnh theo mốc từ thư mục `artifacts/<run_id>/<scene>-<variant>-pose`. Smoke ghi mốc 0, mỗi 50 bước và bước cuối. Khi resume, dùng đúng checkpoint, cấu hình và manifest đã lưu cho run.
 
 ### Nhãn kiểm tra thủ công
 

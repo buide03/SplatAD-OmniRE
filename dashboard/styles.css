@@ -93,6 +93,7 @@ input[type="range"] { flex: 1; min-width: 22px; margin: 0; accent-color: var(--a
 .metric-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--surface); border-radius: 12px; margin: 0 0 13px }
 .metric-list > div { padding: 14px 16px; min-width: 0 }
 .metric-list > div + div { border-inline-start: 1px solid var(--line) }
+#pose-extraction:has(> div:nth-child(4)) { grid-template-columns: repeat(4, minmax(0, 1fr)) }
 .metric-list dt { color: var(--muted); font-size: 14px; line-height: 1.35 }
 .metric-list dd { color: var(--ink); font-weight: 800; font-family: Manrope, system-ui, sans-serif; font-size: clamp(1.25rem, 2.3vw, 2rem); letter-spacing: -.035em; margin-top: 3px; line-height: 1.1 }
 .pose-results { background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 13px }
@@ -131,6 +132,9 @@ tr.selected td { background: var(--accent-soft) }
   .diagnostic-grid { grid-template-columns: 1fr }
 }
 @media (max-width: 420px) {
+  #pose-extraction:has(> div:nth-child(4)) { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+  #pose-extraction > div:nth-child(3):nth-last-child(2) { border-inline-start: 0 }
+  #pose-extraction:has(> div:nth-child(4)) > div:nth-child(n+3) { border-top: 1px solid var(--line) }
   main { padding-inline: 12px }
   .top-inner { padding-inline: 12px; min-height: 55px }
   .player-card { padding: 7px }

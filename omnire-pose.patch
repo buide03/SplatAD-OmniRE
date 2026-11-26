@@ -1,0 +1,18 @@
+diff --git a/datasets/tools/postprocess.py b/datasets/tools/postprocess.py
+--- a/datasets/tools/postprocess.py
++++ b/datasets/tools/postprocess.py
+@@ -463,6 +463,7 @@ def match_and_postprocess(
+             "camera": torch.zeros(3, num_f, 3), # 3 cameras
+             "2DBox_appear_mask": torch.zeros(3, num_f).bool(),
+             "matched_mask": torch.zeros(num_f).bool(), # matched_mask for all cameras
++            "direct_4d_mask": torch.zeros(num_f).bool(),
+             "must_appear_mask": torch.zeros(num_f).bool(),
+             "selected_cam_idx": torch.zeros(num_f).long() - 1,  # -1 means not selected
+         }
+@@ -483,3 +484,6 @@ def match_and_postprocess(
++        # valid_mask still describes original observations before camera-wise completion.
++        original = collector[gt_tid]["valid_mask"][:, mask]
++        merged_collector[gt_tid]["direct_4d_mask"][mask] = original[masked_best_cam_id, torch.arange(masked_best_cam_id.shape[0])]
+         merged_collector[gt_tid]["smpl"]["global_orient"][mask] = collector[gt_tid]["smpl"]["global_orient"][:, mask][masked_best_cam_id, torch.arange(masked_best_cam_id.shape[0])]
+         merged_collector[gt_tid]["smpl"]["body_pose"][mask] = collector[gt_tid]["smpl"]["body_pose"][:, mask][masked_best_cam_id, torch.arange(masked_best_cam_id.shape[0])]
+         merged_collector[gt_tid]["smpl"]["betas"][mask] = collector[gt_tid]["smpl"]["betas"][:, mask][masked_best_cam_id, torch.arange(masked_best_cam_id.shape[0])]

@@ -68,6 +68,7 @@ def main():
     parser.add_argument("--processed", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True, help="Cache the official pose ZIP here")
     parser.add_argument("--scenes", nargs="+", required=True)
+    parser.add_argument("--allow-missing", action="store_true", help="Skip scenes absent from the public pose bundle")
     args = parser.parse_args()
     if not all(re.fullmatch(r"[0-9]{3}", scene) for scene in args.scenes):
         parser.error("Use three-digit PandaSet scene IDs")
@@ -88,6 +89,9 @@ def main():
         for scene in args.scenes:
             member = f"pandaset/processed/{scene}/humanpose/smpl.pkl"
             if member not in archive.namelist():
+                if args.allow_missing:
+                    print(f"{scene}: no published OmniRe reference pose; continue with local 4D-Humans")
+                    continue
                 raise ValueError(f"OmniRe's pose bundle lacks {scene}. Use scripts/omnire-pose.sh.")
             folder = args.processed / scene
             info = instances(args.raw / scene)

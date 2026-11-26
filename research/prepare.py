@@ -39,14 +39,22 @@ def front_pose_summary(manifest):
     selected = set(manifest.get("selected_uuids", []))
     frames = {"4d_humans": set(), "omnire_interpolation": set()}
     tracks = set()
+    reference = set()
     for row in manifest["observations"]:
         source = row.get("pose_source")
         if (row["uuid"] in selected and row["camera"] in FRONT_CAMERAS
                 and row.get("smpl_valid") and source in frames):
-            frames[source].add((row["uuid"], row["frame"]))
+            observed = (row["uuid"], row["frame"])
+            if row.get("pose_origin") == "omnire_reference":
+                reference.add(observed)
+            else:
+                frames[source].add(observed)
             tracks.add(row["uuid"])
-    return {"tracks": len(tracks), "direct_frames": len(frames["4d_humans"]),
-            "completed_frames": len(frames["omnire_interpolation"])}
+    summary = {"tracks": len(tracks), "direct_frames": len(frames["4d_humans"]),
+               "completed_frames": len(frames["omnire_interpolation"])}
+    if reference:
+        summary["reference_frames"] = len(reference)
+    return summary
 
 
 def camera_at(scene, camera, frame):
@@ -210,7 +218,8 @@ def export_tracks(args):
             candidates[f] = (OMNIRE_POSE_CAMERAS[cam], betas, matrices)
         if not candidates:
             continue
-        matched = np.asarray(prediction.get("matched_mask", prediction["valid_mask"]), dtype=bool)
+        matched = np.asarray(prediction.get("direct_4d_mask", prediction.get("matched_mask", prediction["valid_mask"])),
+                             dtype=bool)
         betas = np.median([item[1] for f, item in candidates.items() if matched[f]]
                           or [item[1] for item in candidates.values()], axis=0)
         vertices, joints, inverse = body_model.canonical(torch.tensor(betas, dtype=torch.float32))
@@ -255,7 +264,7 @@ def inventory(args):
 
     raw_scene = args.raw / args.scene
     tracks = validate_tracks(read_json(args.tracks), args.scene)["tracks"] if args.tracks else []
-    usable = {(track["uuid"], frame["frame_idx"]): frame["pose_source"]
+    usable = {(track["uuid"], frame["frame_idx"]): frame
               for track in tracks for frame in track["frames"] if frame["valid"]}
     bbox_review = {}
     if args.review:
@@ -298,7 +307,8 @@ def inventory(args):
                             or not np.isfinite(polygon).all() or (polygon < 0).any()
                             or (polygon >= [w, h]).any()):
                         raise ValueError(f"Invalid silhouette for {uuid}, {name}, frame {f}")
-                pose_source = usable.get((uuid, f))
+                pose = usable.get((uuid, f), {})
+                pose_source = pose.get("pose_source")
                 rows.append({
                     "scene_id": args.scene, "uuid": uuid, "camera": name, "frame": f, "scan": f,
                     "timestamp_s": camera[3], "lidar_timestamp_s": times[f], "distance_m": distance,
@@ -306,6 +316,7 @@ def inventory(args):
                     "bbox_source": "reviewed" if "bbox_xyxy" in review else "projected_cuboid",
                     "limbs_visible": visible, "occlusion": occlusion, "raw_lidar_hits": hits,
                     "smpl_valid": pose_source is not None, "pose_source": pose_source,
+                    "pose_origin": pose.get("pose_origin"),
                     "box_center": center.tolist(), "box_size": size.tolist(), "box_yaw": yaw,
                     "usable": visible is not False and (visible is True or y2 - y1 >= args.min_height),
                     "stationary": bool(box["stationary"]),

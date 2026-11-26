@@ -89,6 +89,9 @@ case "${1:-train}" in
         ;;
     pose)
         checkout omnire "$deps/omnire"
+        if ! git -C "$deps/omnire" apply --reverse --check "$repo/omnire-pose.patch" 2>/dev/null; then
+            git -C "$deps/omnire" apply "$repo/omnire-pose.patch"
+        fi
         git -C "$deps/omnire" submodule update --init --recursive third_party/Humans4D
         [[ "$(git -C "$deps/omnire/third_party/Humans4D" rev-parse HEAD)" == "$(pin humans4d commit)" ]]
         venv="$deps/pose-env"

@@ -33,6 +33,8 @@
       ["Track SMPL", decimal(summary.tracks, 0), "Track SMPL được chọn và xuất hiện ở ba camera trước"],
       ["Pose trực tiếp", decimal(summary.direct_frames, 0), "Số cặp người–frame có pose 4D-Humans, gộp ba camera"],
       ["Pose nội suy", decimal(summary.completed_frames, 0), "Số cặp người–frame được OmniRe hoàn thiện pose"],
+      ...(summary.reference_frames ? [["Bù từ OmniRe", decimal(summary.reference_frames, 0),
+        "Pose từ gói công bố dùng để bù frame còn thiếu sau lần chạy 4D-Humans"]] : []),
     ] : []);
   }
 
