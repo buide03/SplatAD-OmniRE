@@ -12,7 +12,7 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 ### Bắt đầu trên Colab
 
 1. Đặt `pandaset.zip` trong `MyDrive/SplatAD+OmniRe/`, mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` để ưu tiên ZIP trong thư mục dự án, rồi tự dò My Drive và Shared Drives nếu ZIP này vắng. Có thể chỉ định ZIP khác hoặc thư mục đã giải nén trong `PANDASET_PATH`. Colab giải nén tạm các cảnh đã chọn vào `/content/pandaset-from-drive` và kiểm tra ảnh, scan LiDAR và cuboid của cảnh.
-2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt file Neutral có giấy phép tại đường dẫn `SMPL_PICKLE`. Mặc định dùng v1.1 tại `MyDrive/SplatAD+OmniRe/SMPL_NEUTRAL.pkl`. [SMPL](https://smpl.is.tue.mpg.de/)
+2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và đặt file Neutral có giấy phép tại đường dẫn `SMPL_PICKLE`. Notebook ưu tiên bản v1.1 tại `MyDrive/SplatAD+OmniRe/SMPL_NEUTRAL.pkl`. Nếu file này vắng, notebook dùng bản v1.0 có tên `basicModel_neutral_lbs_10_207_0_v1.0.0.pkl` trong cùng thư mục. [SMPL](https://smpl.is.tue.mpg.de/)
 3. Mặc định `STAGE = "curriculum"` train R2 qua `028 → 011 → 008` với 1.200 bước mỗi cảnh. Chọn `STAGE = "scene"` cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước.
 4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Trong `MyDrive/SplatAD+OmniRe/`, `inputs/` và `pose-init/` chứa dữ liệu đã chuẩn bị, `runs/` chứa checkpoint, `artifacts/` chứa video, monitor và metric.
 
@@ -61,7 +61,7 @@ Thứ tự nằm trong [protocol/curriculum.json](protocol/curriculum.json). Col
 | `028` | Hai người đi bộ ở khoảng 8–9 m trong `front_left` | 2 | 2 |
 | `008` | Sàng lọc nhiều track ở ≥30 m | 47 | 30 |
 
-Số liệu lấy từ sáu camera, pose OmniRe công khai và SMPL Neutral v1.0 dùng cho phép kiểm kê CPU. [protocol/pilot.json](protocol/pilot.json) ghi số frame, độ bao phủ và hit LiDAR trước review. Các JSON review đi kèm ghi những crop đã kiểm tra. Cảnh 008 có nhiều vùng bị lan can, xe hoặc bồn cây che chân. Đánh giá chuyển động chi ở cự ly xa cần bổ sung review trực tiếp trên frame đã chọn. Notebook mặc định dùng Neutral v1.1 cho các run GPU.
+Số liệu lấy từ sáu camera, pose OmniRe công khai và SMPL Neutral v1.0 dùng cho phép kiểm kê CPU. [protocol/pilot.json](protocol/pilot.json) ghi số frame, độ bao phủ và hit LiDAR trước review. Các JSON review đi kèm ghi những crop đã kiểm tra. Cảnh 008 có nhiều vùng bị lan can, xe hoặc bồn cây che chân. Đánh giá chuyển động chi ở cự ly xa cần bổ sung review trực tiếp trên frame đã chọn.
 ### Monitor hiệu chỉnh SMPL
 
 - **Trích xuất pose.** Mục **Pose SMPL** đếm track đã chọn và gộp theo từng cặp người–frame ở ba camera trước. Pose trực tiếp đến từ 4D-Humans. Pose nội suy đến từ bước hoàn thiện pose của OmniRe.
