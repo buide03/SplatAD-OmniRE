@@ -36,7 +36,10 @@
             <video id="player" playsinline preload="metadata" muted hidden></video>
             <p class="screen-empty" id="screen-empty" role="status">Đang tải video…</p>
           </div>
-          <div id="front-labels" class="front-labels" aria-label="Camera" hidden></div>
+          <div class="camera-bar">
+            <div id="front-labels" class="front-labels" role="group" aria-label="Góc camera" hidden></div>
+            <button id="all-cameras" class="quiet-button" type="button" hidden>Cả ba</button>
+          </div>
           <div class="transport">
             <button id="play" class="play" type="button" aria-label="Phát" disabled><span aria-hidden="true">▶</span></button>
             <time id="current-time">00:00.0</time>
@@ -46,6 +49,9 @@
               <option value=".25">0.25×</option><option value=".5">0.5×</option>
               <option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option>
             </select>
+            <button id="fullscreen" class="fullscreen" type="button" aria-label="Toàn màn hình" title="Toàn màn hình" hidden>
+              <span aria-hidden="true">⛶</span>
+            </button>
           </div>
         </div>
       </div>
@@ -62,7 +68,10 @@
       <div id="pose-results" class="pose-results" hidden>
         <div class="pose-heading">
           <h3>So khớp mesh</h3>
-          <div id="pose-detail"></div>
+          <div class="pose-actions">
+            <div id="pose-detail"></div>
+            <button id="pose-jump" class="quiet-button" type="button" hidden>Tới khung hình</button>
+          </div>
         </div>
         <div id="pose-panels" class="pose-panels"></div>
         <dl id="pose-fit" class="metric-list fit-list" aria-label="Độ khớp pose" hidden></dl>

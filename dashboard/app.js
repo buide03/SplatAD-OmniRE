@@ -3,8 +3,11 @@ const player = byId("player");
 const selectScene = byId("scene");
 const selectRender = byId("run");
 const tabs = [...document.querySelectorAll("[role=tab]")];
-const state = {runs: [], scene: "", mode: "source", renderPaths: new Map(), playback: null};
+const state = {runs: [], scene: "", mode: "source", camera: "", renderPaths: new Map(), playback: null};
 const cameraLabels = {front_left: "Trước trái", front: "Trước", front_right: "Trước phải"};
+const videoPanel = byId("video-panel");
+const fullscreen = byId("fullscreen");
+let sceneMedia = {};
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -66,16 +69,48 @@ function playbackAvailability(active, message) {
   const empty = byId("screen-empty");
   empty.hidden = Boolean(active);
   empty.textContent = message;
-  for (const id of ["play", "seek", "speed"]) byId(id).disabled = !active;
+  for (const id of ["play", "seek", "speed", "fullscreen"]) byId(id).disabled = !active;
 }
 
-function chooseVideo(run) {
-  return run?.front_triptych ?? run?.videos.find(video => video.camera === "front")
+function cameraVideo(run, name) {
+  return run?.videos.find(video => video.camera === name);
+}
+
+function chooseVideo(run, camera) {
+  return (camera ? cameraVideo(run, camera) : undefined) ?? run?.front_triptych ?? cameraVideo(run, "front")
     ?? run?.videos.find(video => video.camera in cameraLabels);
 }
 
-function showVideo(run) {
-  const video = chooseVideo(run);
+function showCameraPicker(run, video) {
+  const labels = byId("front-labels");
+  const cameras = Object.keys(cameraLabels).filter(name =>
+    run?.front_triptych?.cameras?.includes(name) || cameraVideo(run, name));
+  const signature = cameras.join(",");
+  if (labels.dataset.cameras !== signature) {
+    labels.dataset.cameras = signature;
+    labels.replaceChildren(...cameras.map(name => {
+      const button = element("button", cameraLabels[name]);
+      button.type = "button";
+      button.dataset.camera = name;
+      button.title = `Xem riêng góc ${cameraLabels[name].toLowerCase()}`;
+      button.addEventListener("click", () => {
+        state.camera = name;
+        drawScene();
+      });
+      return button;
+    }));
+  }
+  labels.hidden = !cameras.length;
+  for (const button of labels.children) {
+    const name = button.dataset.camera;
+    button.disabled = !cameraVideo(run, name);
+    button.setAttribute("aria-pressed", String(name === video?.camera));
+  }
+  byId("all-cameras").hidden = !run?.front_triptych || video === run.front_triptych;
+}
+
+function showVideo(run, position) {
+  const video = chooseVideo(run, state.camera);
   const url = video ? artifact(video.file, run) : "";
   let playback = state.playback;
   if (!playback || playback.scene !== state.scene) {
@@ -84,7 +119,8 @@ function showVideo(run) {
   if (playback.url !== url) {
     const keepPosition = state.playback === playback && playback.url && player.readyState >= 1;
     if (keepPosition) playback.position = player.currentTime;
-    const resume = keepPosition && !player.paused;
+    const resume = keepPosition && !player.paused && !Number.isFinite(position);
+    if (Number.isFinite(position)) playback.position = position;
     player.pause();
     player.onloadedmetadata = video ? () => {
       player.currentTime = Math.min(playback.position, player.duration);
@@ -96,6 +132,10 @@ function showVideo(run) {
     player.load();
     player.playbackRate = Number(byId("speed").value);
     playback.url = url;
+  } else if (video && Number.isFinite(position)) {
+    playback.position = position;
+    player.pause();
+    if (player.readyState >= 1) player.currentTime = Math.min(position, player.duration);
   }
   state.playback = playback;
 
@@ -103,11 +143,10 @@ function showVideo(run) {
   else player.removeAttribute("poster");
   playbackAvailability(video, !state.scene ? "Chưa có cảnh." :
     state.mode === "source" ? "Chưa có video gốc." : "Chưa có video render.");
-  byId("video-screen").style.aspectRatio = video?.width && video?.height ? `${video.width} / ${video.height}` : "";
-  const labels = byId("front-labels");
-  const cameras = video ? video.cameras ?? [video.camera] : [];
-  labels.hidden = !cameras.length;
-  labels.replaceChildren(...cameras.map(name => element("span", cameraLabels[name] ?? name)));
+  const screen = byId("video-screen");
+  screen.style.aspectRatio = video?.width && video?.height ? `${video.width} / ${video.height}` : "";
+  screen.classList.toggle("is-focused", Boolean(video && !video.cameras));
+  showCameraPicker(run, video);
   playState();
 }
 
@@ -117,7 +156,7 @@ function renderLabel(run, choices) {
     other.step === run.step).length > 1 ? `${label} · ${run.run_id}` : label;
 }
 
-function drawScene() {
+function drawScene(position) {
   const runs = state.runs.filter(run => String(run.scene) === state.scene);
   const sources = runs.filter(run => run.mode === "source");
   const source = sources.findLast(run => run.front_triptych) ?? sources.findLast(run => chooseVideo(run));
@@ -132,13 +171,37 @@ function drawScene() {
     const active = tab.dataset.mode === state.mode;
     tab.setAttribute("aria-selected", String(active));
     tab.tabIndex = active ? 0 : -1;
-    if (active) byId("video-panel").setAttribute("aria-labelledby", tab.id);
+    if (active) videoPanel.setAttribute("aria-labelledby", tab.id);
   }
-  showVideo(state.mode === "source" ? source : render);
-  window.dispatchEvent(new CustomEvent("splatad:scene", {
-    detail: {source, render, monitors: runs.filter(run => run.mode === "pose_monitor")},
-  }));
+  sceneMedia = {source, render, monitors: runs.filter(run => run.mode === "pose_monitor")};
+  showVideo(sceneMedia[state.mode], position);
+  window.dispatchEvent(new CustomEvent("splatad:scene", {detail: sceneMedia}));
 }
+
+function observationLocation(run, reference) {
+  const single = cameraVideo(run, reference.camera);
+  const singleTime = single?.frame_times?.[reference.frame];
+  const group = run?.front_triptych;
+  const video = Number.isFinite(singleTime) ? single : group;
+  const time = Number.isFinite(singleTime) ? singleTime : group?.frame_times_by_camera?.[reference.camera]?.[reference.frame];
+  if (!Number.isFinite(time)) return null;
+  const position = video.fps > 0 ? Math.round(time * video.fps) / video.fps : time;
+  return {camera: video === single ? reference.camera : "", position};
+}
+
+window.addEventListener("splatad:jump", ({detail: reference}) => {
+  const alternate = state.mode === "source" ? "render" : "source";
+  for (const mode of [state.mode, alternate]) {
+    const location = observationLocation(sceneMedia[mode], reference);
+    if (!location) continue;
+    state.mode = mode;
+    state.camera = location.camera;
+    drawScene(location.position);
+    byId("replay").scrollIntoView({block: "start"});
+    byId("play").focus({preventScroll: true});
+    break;
+  }
+});
 
 function switchMode(tab, focus = false) {
   state.mode = tab.dataset.mode;
@@ -159,6 +222,7 @@ for (const [index, tab] of tabs.entries()) {
 
 selectScene.addEventListener("change", () => {
   state.scene = selectScene.value;
+  state.camera = "";
   drawScene();
 });
 selectRender.addEventListener("change", () => {
@@ -166,6 +230,12 @@ selectRender.addEventListener("change", () => {
   drawScene();
 });
 
+byId("all-cameras").addEventListener("click", () => {
+  const previous = state.camera;
+  state.camera = "";
+  drawScene();
+  [...byId("front-labels").children].find(button => button.dataset.camera === previous)?.focus({preventScroll: true});
+});
 byId("speed").addEventListener("change", event => { player.playbackRate = Number(event.target.value); });
 byId("seek").addEventListener("input", event => { player.currentTime = Number(event.target.value); });
 byId("play").addEventListener("click", () => {
@@ -176,6 +246,22 @@ for (const name of ["durationchange", "timeupdate", "play", "pause", "ended", "e
   player.addEventListener(name, playState);
 }
 player.addEventListener("error", () => playbackAvailability(false, "Không mở được video."));
+
+fullscreen.hidden = !document.fullscreenEnabled && !player.webkitEnterFullscreen;
+fullscreen.addEventListener("click", async () => {
+  try {
+    if (document.fullscreenElement === videoPanel) await document.exitFullscreen();
+    else if (document.fullscreenEnabled) await videoPanel.requestFullscreen();
+    else player.webkitEnterFullscreen?.();
+  } catch {
+    fullscreen.title = "Trình duyệt chưa mở được chế độ toàn màn hình.";
+  }
+});
+document.addEventListener("fullscreenchange", () => {
+  const label = document.fullscreenElement === videoPanel ? "Thoát toàn màn hình" : "Toàn màn hình";
+  fullscreen.title = label;
+  fullscreen.setAttribute("aria-label", label);
+});
 
 let catalogKey;
 let polling = false;

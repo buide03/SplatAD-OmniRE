@@ -97,7 +97,7 @@ Các tọa độ và `vertex_id` ở trên minh họa định dạng. Chọn ID 
 python -m research.dashboard --artifacts /path/to/artifacts --port 8765
 ```
 
-Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Trình phát đọc MP4 theo byte range để tua và đổi tốc độ. Dashboard đọc số liệu pose từ manifest và monitor. Các tệp đánh giá RGB/LiDAR đầy đủ vẫn lưu cùng artifact để phục vụ đối chứng.
+Mở [http://127.0.0.1:8765](http://127.0.0.1:8765). Bấm tên camera để xem riêng và bấm **Cả ba** để trở về khung đồng bộ. Vị trí phát được giữ khi đổi góc hoặc thẻ. Trong **Pose SMPL**, nút **Tới khung hình** mở đúng camera và mốc quan sát. Các tệp đánh giá RGB/LiDAR lưu cùng artifact để phục vụ đối chứng.
 
 Các lệnh riêng có thể chạy từ root repo sau khi kích hoạt `.deps/train-env/activate-research`.
 

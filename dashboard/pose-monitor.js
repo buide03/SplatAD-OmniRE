@@ -15,6 +15,7 @@
   let data;
   let step;
   let selectionKey;
+  let media = {};
   let revision = 0;
 
   function metrics(container, values) {
@@ -123,6 +124,7 @@
     const current = series.find(entry => entry.step === step) ?? series.at(-1);
     results.hidden = !current;
     observation.hidden = !current || observation.options.length < 2;
+    drawJump(reference);
     note("pose-status", current ? "" : record ? "Đang đợi mốc hiệu chỉnh SMPL." : "Chưa có dữ liệu hiệu chỉnh SMPL.");
     if (!current) return;
     step = current.step;
@@ -160,13 +162,22 @@
     drawProbe(active);
   }
 
+  function drawJump(reference) {
+    byId("pose-jump").hidden = !reference ||
+      ![media.source, media.render].some(run => observationLocation(run, reference));
+  }
+
   async function update(event) {
+    media = event.detail;
     const {source, render, monitors} = event.detail;
     const eligible = render ? monitors.filter(run => run.run_id === render.run_id && run.variant === render.variant) : monitors;
     const chosen = eligible.findLast(run => run.variant === "R2") ?? eligible.at(-1);
     drawExtraction(render?.variant === "R0" ? null : render?.pose_summary ?? chosen?.pose_summary ?? source?.pose_summary);
     const next = chosen ? `${chosen.path}/${chosen.step}/${chosen.snapshots}` : "";
-    if (selectionKey === next) return;
+    if (selectionKey === next) {
+      drawJump(data?.observations[observation.value]);
+      return;
+    }
     selectionKey = next;
     const updateIndex = ++revision;
     const sameRun = record?.path === chosen?.path;
@@ -199,5 +210,9 @@
   }
 
   observation.addEventListener("change", draw);
+  byId("pose-jump").addEventListener("click", () => {
+    const reference = data?.observations[observation.value];
+    if (reference) window.dispatchEvent(new CustomEvent("splatad:jump", {detail: reference}));
+  });
   window.addEventListener("splatad:scene", update);
 })();
