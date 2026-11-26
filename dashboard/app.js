@@ -144,6 +144,9 @@ function showVideo(run, position) {
   playbackAvailability(video, !state.scene ? "Chưa có cảnh." :
     state.mode === "source" ? "Chưa có video gốc." : "Chưa có video render.");
   const screen = byId("video-screen");
+  const rate = byId("video-fps");
+  rate.hidden = !Number.isFinite(video?.fps);
+  rate.textContent = rate.hidden ? "" : `${video.fps} FPS`;
   screen.style.aspectRatio = video?.width && video?.height ? `${video.width} / ${video.height}` : "";
   screen.classList.toggle("is-focused", Boolean(video && !video.cameras));
   showCameraPicker(run, video);
@@ -152,8 +155,11 @@ function showVideo(run, position) {
 
 function renderLabel(run, choices) {
   const label = run.mode === "zero_smpl_velocity" ? `${run.variant} · vận tốc 0` : `${run.variant} · bước ${run.step}`;
-  return choices.filter(other => other.variant === run.variant && other.mode === run.mode &&
-    other.step === run.step).length > 1 ? `${label} · ${run.run_id}` : label;
+  const similar = choices.filter(other => other.variant === run.variant && other.mode === run.mode && other.step === run.step);
+  if (similar.length < 2) return label;
+  const detail = [run.front_triptych?.fps ? `${run.front_triptych.fps} FPS` : "", run.interpolation === "smooth" ? "Mượt" : ""];
+  if (similar.some(other => other.run_id !== run.run_id)) detail.push(run.run_id);
+  return [label, ...detail.filter(Boolean)].join(" · ");
 }
 
 function drawScene(position) {
@@ -161,9 +167,12 @@ function drawScene(position) {
   const sources = runs.filter(run => run.mode === "source");
   const source = sources.findLast(run => run.front_triptych) ?? sources.findLast(run => chooseVideo(run));
   const renders = runs.filter(run => ["checkpoint", "zero_smpl_velocity"].includes(run.mode) && chooseVideo(run));
-  const render = renders.find(run => run.path === state.renderPaths.get(state.scene))
-    ?? renders.findLast(run => run.mode === "checkpoint" && run.variant === "R2" && run.front_triptych)
+  const latest = renders.findLast(run => run.mode === "checkpoint" && run.variant === "R2" && run.front_triptych)
     ?? renders.findLast(run => run.front_triptych) ?? renders.at(-1);
+  const render = renders.find(run => run.path === state.renderPaths.get(state.scene))
+    ?? renders.findLast(run => run.step === latest?.step && run.variant === latest.variant && run.mode === latest.mode
+      && run.front_triptych && run.interpolation === "smooth")
+    ?? latest;
   options(selectRender, renders.map(run => [run.path, renderLabel(run, renders)]), render?.path, "Chưa có bản render");
   selectRender.hidden = state.mode !== "render" || renders.length < 2;
   byId("scene-title").textContent = state.scene ? `Cảnh ${state.scene}` : "PandaSet";

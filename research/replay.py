@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
+import numpy as np
 import torch
 
 from .evaluate import camera_indices, camera_sample, load_checkpoint, run_record, to_image
@@ -13,16 +14,30 @@ from .prepare import dump_json, read_json, sha256
 from .sync_video import FRONT_CAMERAS, Timeline, combine_front, ffmpeg_executable, write_video
 
 
-def camera_between(a, b, time, alpha):
-    rot = slerp(matrix_quat(a.camera_to_worlds[..., :3]), matrix_quat(b.camera_to_worlds[..., :3]), alpha)
-    origin = a.camera_to_worlds[..., 3:].lerp(b.camera_to_worlds[..., 3:], alpha)
+def camera_between(a, b, time, alpha, pose=None):
+    if pose is None:
+        rot = slerp(matrix_quat(a.camera_to_worlds[..., :3]), matrix_quat(b.camera_to_worlds[..., :3]), alpha)
+        origin = a.camera_to_worlds[..., 3:].lerp(b.camera_to_worlds[..., 3:], alpha)
+        pose = torch.cat((quat_matrix(rot), origin), dim=-1)
     metadata = dict(a.metadata)
     metadata.pop("cam_idx", None)
     for key in ("time_to_center_pixel", "linear_velocities_local", "angular_velocities_local", "rolling_shutter_time"):
         if key in a.metadata and key in b.metadata:
             metadata[key] = a.metadata[key].lerp(b.metadata[key], alpha)
-    return replace(a, camera_to_worlds=torch.cat((quat_matrix(rot), origin), dim=-1),
+    return replace(a, camera_to_worlds=pose,
                    times=a.times.new_full(a.times.shape, time), metadata=metadata)
+
+
+def smooth_camera_poses(views, times, sample_times):
+    from scipy.interpolate import PchipInterpolator
+    from scipy.spatial.transform import Rotation, RotationSpline
+
+    recorded = torch.cat([view.camera_to_worlds for view in views]).cpu().numpy()
+    samples = np.clip(sample_times, times[0], times[-1])
+    position = PchipInterpolator(times, recorded[..., 3], axis=0)(samples)
+    rotation = RotationSpline(times, Rotation.from_matrix(recorded[..., :3]))(samples).as_matrix()
+    poses = np.concatenate((rotation, position[..., None]), axis=-1)
+    return views[0].camera_to_worlds.new_tensor(poses).unsqueeze(1)
 
 
 def camera_track(manager, camera_name, indices):
@@ -42,12 +57,15 @@ def camera_center_offset(model, camera):
 
 
 @torch.inference_mode()
-def render_camera(model, camera_name, track, output, timeline, scale, crf, ffmpeg, center_offset=None):
+def render_camera(model, camera_name, track, output, timeline, scale, crf, ffmpeg,
+                  center_offset=None, interpolation="smooth"):
     frames, views, times = track
     for view in views:
         if scale != 1:
             view.rescale_output_resolution(scale)
     width, height = int(views[0].width.item()), int(views[0].height.item())
+    sample_times = tuple(timeline.times())
+    poses = smooth_camera_poses(views, times, sample_times) if interpolation == "smooth" else None
     path = output / f"{camera_name}.mp4"
     elapsed_gpu = 0.0
     mark, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -58,12 +76,13 @@ def render_camera(model, camera_name, track, output, timeline, scale, crf, ffmpe
 
     def images():
         nonlocal elapsed_gpu
-        for time in timeline.times():
+        for index, time in enumerate(sample_times):
             left = min(max(0, bisect_right(times, time) - 1), len(times) - 2)
             # At a camera's staggered endpoints, hold its pose while the scene clock continues.
             alpha = min(1.0, max(0.0, (time - times[left]) / (times[left + 1] - times[left])))
             mark.record()
-            camera = camera_between(views[left], views[left + 1], time, views[left].times.new_tensor(alpha))
+            camera = camera_between(views[left], views[left + 1], time, views[left].times.new_tensor(alpha),
+                                    poses[index] if poses is not None else None)
             if center_offset is not None:
                 # The renderer adds its own offset to camera.times. Compensate the
                 # input time so all views query the same scene at the front-camera center.
@@ -98,12 +117,16 @@ def main():
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--scale", type=float, default=1)
     parser.add_argument("--crf", type=int, default=16)
+    parser.add_argument("--interpolation", choices=("smooth", "linear"), default="smooth")
     parser.add_argument("--zero-smpl-velocity", action="store_true")
     args = parser.parse_args()
     ffmpeg = ffmpeg_executable()
     if not (1 <= args.fps <= 120 and 0 < args.scale <= 1 and 0 <= args.crf <= 51):
         parser.error("Use 1–120 FPS, a scale in (0,1], and a CRF in [0,51]")
     config, pipeline, checkpoint, step = load_checkpoint(args.config.resolve(), args.checkpoint)
+    if args.interpolation == "smooth":
+        for person in pipeline.model.people:
+            person.prepare_smooth_replay()
     mode = "zero_smpl_velocity" if args.zero_smpl_velocity else "checkpoint"
     pipeline.model.human_motion = not args.zero_smpl_velocity
     manifest_path = args.manifest or config.pipeline.model.manifest_path
@@ -117,7 +140,10 @@ def main():
     record = read_json(metadata_path) if metadata_path.exists() else candidate
     if any(record[key] != candidate[key] for key in ("scene", "variant", "run_id", "step", "mode", "manifest_sha256")):
         parser.error("The output directory already belongs to another run")
+    if record["videos"] and record.get("interpolation", "linear") != args.interpolation:
+        parser.error("Use a different output directory for a different interpolation mode")
     record["pose_summary"] = candidate["pose_summary"]
+    record["interpolation"] = args.interpolation
     if not (args.output / "metrics.json").exists():
         record["metrics"] = None
     if not (args.output / "training.jsonl").exists():
@@ -136,7 +162,8 @@ def main():
         front_view = synchronized and camera in FRONT_CAMERAS
         clock = front_clock if front_view else Timeline.from_tracks([tracks[camera][2]], args.fps)
         videos[camera] = render_camera(pipeline.model, camera, tracks[camera], args.output, clock,
-                                       args.scale, args.crf, ffmpeg, center_offset if front_view else None)
+                                       args.scale, args.crf, ffmpeg, center_offset if front_view else None,
+                                       interpolation=args.interpolation)
         record["videos"] = list(videos.values())
         dump_json(metadata_path, record)
         stats = videos[camera]

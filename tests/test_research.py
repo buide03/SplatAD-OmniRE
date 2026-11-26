@@ -7,7 +7,7 @@ import torch
 from research.compare import paired
 from research.evaluate import crop_bounds
 from research.geometry import apply, blend, joint_transforms, matrix_quat, quat_matrix, slerp
-from research.replay import camera_between
+from research.replay import camera_between, smooth_camera_poses
 from research.smpl_nodes import SMPLTrack
 
 
@@ -121,3 +121,37 @@ def test_replay_interpolates_sensor_pose_and_time():
     assert torch.allclose(rotated, torch.tensor([2**-0.5, 2**-0.5, 0.]), atol=1e-6)
     assert "cam_idx" not in camera.metadata and a.metadata["cam_idx"] == 1
     assert torch.equal(camera.metadata["sensor_idxs"], torch.tensor([[2]]))
+
+
+def test_smooth_replay_camera_keeps_recorded_poses_and_continuous_velocity():
+    times = [0.0, 0.1, 0.22, 0.3]
+    angles = torch.tensor([0.0, 0.1, 0.6, 0.72])
+    zero = torch.zeros_like(angles)
+    rotation = quat_matrix(torch.stack((angles.cos(), zero, zero, angles.sin()), -1))
+    position = torch.tensor([[0., 0., 0.], [0.07, 0., 0.], [0.41, 0., 0.], [0.6, 0., 0.]])
+    recorded = torch.cat((rotation, position.unsqueeze(-1)), -1).unsqueeze(1)
+    views = [SimpleNamespace(camera_to_worlds=pose) for pose in recorded]
+    sample_times = [-0.04, *times, 0.35, 0.1 - 1e-4, 0.1 + 1e-4]
+    samples = smooth_camera_poses(views, times, sample_times)
+    assert torch.allclose(samples[1:5], recorded, atol=1e-6)
+    assert torch.allclose(samples[0], recorded[0], atol=1e-6)
+    assert torch.allclose(samples[5], recorded[-1], atol=1e-6)
+    before, after = (samples[2] - samples[6]) / 1e-4, (samples[7] - samples[2]) / 1e-4
+    assert torch.allclose(before, after, atol=0.04)
+
+
+def test_smooth_replay_smpl_root_keeps_keyframes_and_does_not_bridge_gaps():
+    track = person(frame_ids=(0, 1, 2, 4, 5))
+    with torch.no_grad():
+        track.translation[:, 0] = torch.tensor([0.0, 0.08, 0.3, 0.8, 1.0])
+    initial = [track.get_gaussians_at(time)["means"] for time in track.times]
+    keys = track.state_dict().keys()
+    track.prepare_smooth_replay()
+    assert track.state_dict().keys() == keys
+    for time, means in zip(track.times, initial, strict=True):
+        assert torch.allclose(track.get_gaussians_at(time)["means"], means)
+    first = track.get_gaussians_at(track.times[1] - 1e-4)["velocities"]
+    second = track.get_gaussians_at(track.times[1] + 1e-4)["velocities"]
+    assert torch.allclose(first, second, atol=0.015)
+    assert not track.get_gaussians_at(torch.tensor(0.3))["opacities"].any()
+    assert not track.get_gaussians_at(torch.tensor(0.03), motion=False)["velocities"].any()

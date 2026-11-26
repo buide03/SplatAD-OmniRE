@@ -30,6 +30,7 @@ class SMPLTrack(nn.Module):
         }.items():
             self.register_buffer(name, x)
         self.translation = nn.Parameter(roots, requires_grad=optimize)
+        self.replay_translation_tangents = None
         self.root = nn.Parameter(root_quats, requires_grad=optimize)
         self.body = nn.Parameter(body_quats, requires_grad=optimize)
         quats, scales = mesh_gaussians(vertices, body.faces)
@@ -51,7 +52,39 @@ class SMPLTrack(nn.Module):
         alpha = ((time - self.times[lo]) / (self.times[hi] - self.times[lo]).clamp_min(1e-6)).clamp(0, 1)
         return lo, hi, alpha, visible
 
-    def _world_transforms(self, index, other=None, alpha=None, initial=False):
+    @torch.no_grad()
+    def prepare_smooth_replay(self):
+        """Fit root translation derivatives for the valid runs in this checkpoint."""
+        from scipy.interpolate import PchipInterpolator
+
+        times = self.times.cpu().numpy()
+        roots = self.translation.detach().cpu().numpy()
+        gaps = ((self.frame_ids[1:] - self.frame_ids[:-1] != 1)
+                | (self.times[1:] - self.times[:-1] > 0.2))
+        ends = [*(gaps.nonzero().flatten() + 1).tolist(), len(times)]
+        tangents = self.translation.detach().new_zeros(self.translation.shape)
+        start = 0
+        for end in ends:
+            if end - start >= 2:
+                span = slice(start, end)
+                derivatives = PchipInterpolator(times[span], roots[span], axis=0)(times[span], nu=1)
+                tangents[span] = tangents.new_tensor(derivatives)
+            start = end
+        self.replay_translation_tangents = tangents
+
+    def _smooth_translation(self, lo, hi, alpha):
+        start, end = self.translation[lo], self.translation[hi]
+        dt = self.times[hi] - self.times[lo]
+        left = self.replay_translation_tangents[lo]
+        right = self.replay_translation_tangents[hi]
+        delta = end - start
+        position = start + alpha.square() * (3 - 2 * alpha) * delta
+        position = position + dt * alpha * (1 - alpha) * ((1 - alpha) * left - alpha * right)
+        speed = (6 * alpha * (1 - alpha) * delta / dt.clamp_min(1e-6)
+                 + (1 - alpha) * (1 - 3 * alpha) * left + alpha * (3 * alpha - 2) * right)
+        return position, speed
+
+    def _world_transforms(self, index, other=None, alpha=None, initial=False, shift_override=None):
         roots = self.initial_root if initial else self.root
         body = self.initial_body if initial else self.body
         translation = self.initial_translation if initial else self.translation
@@ -59,7 +92,7 @@ class SMPLTrack(nn.Module):
         pose, shift = q[index], translation[index]
         if other is not None:
             pose = slerp(pose, q[other], alpha)
-            shift = shift.lerp(translation[other], alpha)
+            shift = shift.lerp(translation[other], alpha) if shift_override is None else shift_override
         transform = joint_transforms(quat_matrix(pose), self.joints, self.parents) @ self.inverse_canonical
         return torch.cat((transform[..., :3, :3], transform[..., :3, 3:] + shift[:, None]), dim=-1)
 
@@ -70,7 +103,9 @@ class SMPLTrack(nn.Module):
 
     def get_gaussians_at(self, time, motion=True):
         lo, hi, alpha, visible = self._span(time.to(self.times).reshape(()))
-        transform = blend(self.weights, self._world_transforms(lo, hi, alpha))
+        smooth_shift, root_speed = (self._smooth_translation(lo, hi, alpha)
+                                    if self.replay_translation_tangents is not None else (None, None))
+        transform = blend(self.weights, self._world_transforms(lo, hi, alpha, shift_override=smooth_shift))
         means = apply(transform, self.means)
         quats = matrix_quat(transform[..., :3] @ quat_matrix(self.quats))
         velocity = torch.zeros_like(means)
@@ -86,6 +121,9 @@ class SMPLTrack(nn.Module):
                 dt = (self.times[end] - self.times[start]).clamp_min(1e-6)
                 difference = self._world_transforms(end) - self._world_transforms(start)
                 velocity = apply(blend(self.weights, difference / dt), self.means) * visible
+                if root_speed is not None:
+                    linear_root_speed = (self.translation[end] - self.translation[start]) / dt
+                    velocity = velocity + (root_speed - linear_root_speed) * visible
         return {
             "means": means, "quats": quats, "velocities": velocity,
             "scales": self.scales.exp(), "opacities": self.opacities.sigmoid().squeeze(-1) * visible,

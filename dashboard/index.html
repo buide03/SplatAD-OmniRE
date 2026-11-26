@@ -29,7 +29,10 @@
             <button id="source-tab" type="button" role="tab" aria-selected="true" aria-controls="video-panel" data-mode="source">Gốc</button>
             <button id="render-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="render" tabindex="-1">Render</button>
           </div>
-          <select id="run" aria-label="Chọn bản render" hidden></select>
+          <div class="video-options">
+            <select id="run" aria-label="Chọn bản render" hidden></select>
+            <span id="video-fps" hidden></span>
+          </div>
         </div>
         <div id="video-panel" role="tabpanel" aria-labelledby="source-tab">
           <div class="screen" id="video-screen">

@@ -322,6 +322,8 @@ def main():
         record["videos"] = existing["videos"]
         if "front_triptych" in existing:
             record["front_triptych"] = existing["front_triptych"]
+        if "interpolation" in existing:
+            record["interpolation"] = existing["interpolation"]
     evaluate(pipeline, manifest, args.output, probes=args.probes, write_panels=not args.no_panels)
     if record["training"]:
         source = config.get_base_dir() / record["training"]

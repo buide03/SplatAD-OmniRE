@@ -29,6 +29,7 @@ Bộ pose công khai của OmniRe có 39 cảnh, gồm cảnh 011. Chọn `USE_P
 - **LiDAR.** Range MAE tính trên tia có phản hồi GT nằm trong cuboid của UUID, xác định từ chính raster đã dùng để render. Xuất số hit trước và sau lọc quantile. Thiếu hit được ghi là thiếu mẫu. Range panel hiển thị batch raster đầu tiên, metric dùng toàn bộ batch.
 - **Tổng hợp.** Đối chiếu trên khóa scene/UUID/camera/frame chung có SMPL hợp lệ, sau đó trung bình quan sát → UUID → scene. LiDAR gộp tia theo scene/UUID/scan trong mỗi bin. `comparison.csv` và `comparison.json` kèm số mẫu và kết quả theo scene.
 - **Phát lại.** Mặc định MP4 H.264, CRF 16 và 60 FPS cho bản render. Ba view `front_left`, `front`, `front_right` chia sẻ cùng lưới timestamp từ quan sát đầu tiên đến cuối cùng. Pose cảnh dùng mốc giữa phơi sáng của camera trước làm tham chiếu, còn từng camera giữ hiệu chỉnh rolling shutter. Render lần lượt mỗi view ở độ phân giải gốc để giảm VRAM. Ba clip được ghép trái, giữa, phải vào một MP4 tối đa 3840 px ngang. Dashboard giữ vị trí phát theo cảnh khi đổi giữa Gốc và Render.
+- **Chuyển động giữa các mốc.** `REPLAY_INTERPOLATION="smooth"` dùng PCHIP cho vị trí camera và gốc SMPL, cùng spline quay cho hướng camera. Các mốc đầu vào được giữ nguyên. Khoảng trống dài của track SMPL vẫn theo quy tắc hiện diện của mô hình. Bản render truy vấn cảnh ở từng mốc đầu ra. Đổi chế độ nội suy hoặc `REPLAY_FPS` chỉ cần chạy lại bước xuất video nếu đã có checkpoint. Dùng `linear` để đối chiếu với nội suy cũ.
 
 ### Thứ tự huấn luyện theo độ khó
 
