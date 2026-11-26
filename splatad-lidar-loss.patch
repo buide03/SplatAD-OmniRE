@@ -1,0 +1,75 @@
+diff --git a/nerfstudio/models/splatad.py b/nerfstudio/models/splatad.py
+--- a/nerfstudio/models/splatad.py
++++ b/nerfstudio/models/splatad.py
+@@ -1269,9 +1269,9 @@
+
+     def filter_lidar_pred_and_gt(self, outputs, batch, output_point_cloud=False):
+         gt_lidar = batch["raster_pts"]  # (azimuth, elev, depth, time, intensity)
+-        raster_pts_valid_and_did_return = batch["raster_pts_valid_depth_and_did_return"]
++        raster_pts_valid_and_did_return = batch["raster_pts_valid_depth_and_did_return"].reshape(-1)
+         raster_pts_did_return = batch["raster_pts_did_return"].flatten()
+-        raster_pts_valid_and_did_not_return = batch["raster_pts_valid_depth_and_did_not_return"]
++        raster_pts_valid_and_did_not_return = batch["raster_pts_valid_depth_and_did_not_return"].reshape(-1)
+
+         gt = {}
+         gt["depth"] = gt_lidar[..., 2].flatten()[raster_pts_valid_and_did_return]
+@@ -1346,14 +1346,16 @@
+         if "raster_pts" in batch:
+             pred, gt = self.filter_lidar_pred_and_gt(outputs, batch)
+
+-            metrics_dict["depth_median_l2"] = float(self.median_l2(pred["depth"], gt["depth"]))
+-            metrics_dict["depth_mean_rel_l2"] = float(self.mean_rel_l2(pred["depth"], gt["depth"]))
+-            metrics_dict["median_depth_median_l2"] = float(self.median_l2(pred["median_depth"], gt["depth"]))
+-            metrics_dict["median_depth_mean_rel_l2"] = float(self.mean_rel_l2(pred["median_depth"], gt["depth"]))
+-            metrics_dict["intensity_rmse"] = float(self.rmse(pred["intensity"], gt["intensity"]))
+-            metrics_dict["ray_drop_accuracy"] = (
+-                ((pred["ray_drop"].sigmoid() > 0.5) == gt["ray_drop"]) * gt["valid"]
+-            ).sum() / gt["valid"].sum()
++            if pred["depth"].numel():
++                metrics_dict["depth_median_l2"] = float(self.median_l2(pred["depth"], gt["depth"]))
++                metrics_dict["depth_mean_rel_l2"] = float(self.mean_rel_l2(pred["depth"], gt["depth"]))
++                metrics_dict["median_depth_median_l2"] = float(self.median_l2(pred["median_depth"], gt["depth"]))
++                metrics_dict["median_depth_mean_rel_l2"] = float(self.mean_rel_l2(pred["median_depth"], gt["depth"]))
++                metrics_dict["intensity_rmse"] = float(self.rmse(pred["intensity"], gt["intensity"]))
++            if gt["valid"].any():
++                metrics_dict["ray_drop_accuracy"] = (
++                    ((pred["ray_drop"].sigmoid() > 0.5) == gt["ray_drop"]) * gt["valid"]
++                ).sum() / gt["valid"].sum()
+
+         self.camera_optimizer.get_metrics_dict(metrics_dict)
+         self.camera_velocity_optimizer.get_metrics_dict(metrics_dict)
+@@ -1417,22 +1419,22 @@
+             pred, gt = self.filter_lidar_pred_and_gt(outputs, batch)
+
+             unreduced_depth_loss = self.depth_loss(pred["depth"], gt["depth"])
+-            quantile = torch.quantile(unreduced_depth_loss, self.config.depth_loss_quantile_threshold)
+-            quantile_mask = unreduced_depth_loss < quantile
+-            loss_dict["depth_loss"] = self.config.depth_lambda * torch.mean(unreduced_depth_loss * quantile_mask)
+-
+-            loss_dict["intensity_loss"] = self.config.intensity_lambda * self.intensity_loss(
+-                pred["intensity"] * quantile_mask,
+-                gt["intensity"] * quantile_mask,
+-            )
++            if unreduced_depth_loss.numel():
++                quantile = torch.quantile(unreduced_depth_loss, self.config.depth_loss_quantile_threshold)
++                quantile_mask = unreduced_depth_loss <= quantile
++                loss_dict["depth_loss"] = self.config.depth_lambda * torch.mean(unreduced_depth_loss * quantile_mask)
++                loss_dict["intensity_loss"] = self.config.intensity_lambda * self.intensity_loss(
++                    pred["intensity"] * quantile_mask,
++                    gt["intensity"] * quantile_mask,
++                )
++                if "alpha_sum_until_points" in pred and self.config.line_of_sight_lambda > 0:
++                    loss_dict["alpha_sum_until_points_loss"] = self.config.line_of_sight_lambda * torch.mean(
++                        pred["alpha_sum_until_points"] * quantile_mask
++                    )
+             loss_dict["ray_drop_loss"] = self.config.ray_drop_lambda * self.ray_drop_loss(
+                 pred["ray_drop"],
+                 gt["ray_drop"].to(pred["ray_drop"]),
+             )
+
+-            if "alpha_sum_until_points" in pred and self.config.line_of_sight_lambda > 0:
+-                loss_dict["alpha_sum_until_points_loss"] = self.config.line_of_sight_lambda * torch.mean(
+-                    pred["alpha_sum_until_points"] * quantile_mask
+-                )
+
+         return loss_dict

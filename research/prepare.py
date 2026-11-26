@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import pickle
+from bisect import bisect_left
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,6 +17,8 @@ CAMERAS = ("front", "front_left", "front_right", "left", "right", "back")
 OMNIRE_POSE_CAMERAS = CAMERAS
 PEDESTRIANS = {"Pedestrian", "Pedestrian with Object"}
 CORNERS = np.array(list(itertools.product((-0.5, 0.5), repeat=3)))
+CUBOID_EDGES = tuple((i, j) for i, j in itertools.combinations(range(len(CORNERS)), 2)
+                     if np.count_nonzero(CORNERS[i] != CORNERS[j]) == 1)
 
 
 def dump_json(path, value):
@@ -78,8 +81,17 @@ def projected_box(center, dimensions, yaw, camera, height, width):
     cos, sin = math.cos(yaw), math.sin(yaw)
     local_to_world = np.array([[cos, -sin, 0], [sin, cos, 0], [0, 0, 1]])
     xyz = ((CORNERS * dimensions) @ local_to_world.T + center - origin) @ rot
-    if (xyz[:, 2] <= 0.5).any():
+    front = xyz[:, 2] >= 0.5
+    if not front.any():
         return None
+    if not front.all():
+        # Keep the visible part of cuboids that intersect the camera's near plane.
+        clipped = [xyz[front]]
+        for i, j in CUBOID_EDGES:
+            if front[i] != front[j]:
+                delta = xyz[j] - xyz[i]
+                clipped.append((xyz[i] + (0.5 - xyz[i, 2]) / delta[2] * delta)[None])
+        xyz = np.concatenate(clipped)
     pixel = xyz[:, :2] / xyz[:, 2:] * [k["fx"], k["fy"]] + [k["cx"], k["cy"]]
     lower = np.maximum(np.floor(pixel.min(0)), 0).astype(int)
     upper = np.minimum(np.ceil(pixel.max(0)), [width, height]).astype(int)
@@ -175,6 +187,43 @@ def prepare_smpl(args):
     temporary.replace(args.output)
 
 
+def complete_world_roots(samples, matched, frame_times):
+    """Correct OmniRe's globally filled roots after converting the anchors to world coordinates."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    anchors = sorted(frame for frame in samples if matched[frame])
+    if not anchors:
+        return
+    for frame, (_, _, matrices) in samples.items():
+        if matched[frame]:
+            continue
+        index = bisect_left(anchors, frame)
+        left = anchors[max(0, index - 1)]
+        right = anchors[min(len(anchors) - 1, index)]
+        _, start, left_pose = samples[left]
+        _, end, right_pose = samples[right]
+        time = frame_times[frame]
+        if left == right:
+            root = left_pose[0]
+        else:
+            rotations = Rotation.from_matrix(np.stack((left_pose[0], right_pose[0])))
+            root = Slerp([start, end], rotations)(np.clip(time, start, end)).as_matrix()
+        matrices = matrices.copy()
+        matrices[0] = root
+        samples[frame] = (None, time, matrices)
+
+
+def cuboid_center_at(cuboids, frame_times, frame, timestamp):
+    """Interpolate adjacent cuboid centers on the nominal scene frame grid."""
+    center = np.asarray(cuboids[frame])[:3, 3]
+    delta = timestamp - frame_times[frame]
+    other = frame + (1 if delta > 0 else -1)
+    if not delta or other not in cuboids:
+        return center
+    fraction = np.clip(delta / (frame_times[other] - frame_times[frame]), 0, 1)
+    return center + fraction * (np.asarray(cuboids[other])[:3, 3] - center)
+
+
 def export_tracks(args):
     import joblib
     import torch
@@ -187,7 +236,8 @@ def export_tracks(args):
     instances = read_json(processed / "instances" / "instances_info.json")
     poses = joblib.load(processed / "humanpose" / "smpl.pkl")
     body_model = BodyModel(args.body)
-    frames_total = len(_camera_metadata(scene / "camera" / "front_camera")[2])
+    frame_times = np.asarray(_camera_metadata(scene / "camera" / "front_camera")[2]) - 0.01
+    frames_total = len(frame_times)
     canonical_ids = {str(row["uuid"]) for f in range(frames_total) for row in box_records(scene, f)}
     document = {
         "schema_version": 1, "scene_id": args.scene, "coordinate_system": "pandaset_world",
@@ -208,6 +258,7 @@ def export_tracks(args):
         annotations = instance["frame_annotations"]
         cuboids = dict(zip(annotations["frame_idx"], annotations["obj_to_world"], strict=True))
         candidates = {}
+        world_samples = {}
         for f, valid in enumerate(np.asarray(prediction["valid_mask"], dtype=bool)):
             cam = int(prediction["selected_cam_idx"][f])
             if not valid or f not in cuboids or not 0 <= cam < len(OMNIRE_POSE_CAMERAS):
@@ -218,34 +269,35 @@ def export_tracks(args):
                                        np.asarray(smpl["body_pose"][f]).reshape(23, 3, 3)))
             if not np.isfinite(betas).all() or not np.isfinite(matrices).all() or (np.linalg.det(matrices) < 0.5).any():
                 continue
-            candidates[f] = (OMNIRE_POSE_CAMERAS[cam], betas, matrices)
+            camera = OMNIRE_POSE_CAMERAS[cam]
+            rot, _, _, time = camera_at(scene, camera, f)
+            matrices[0] = rot @ matrices[0]
+            world_samples[f] = (camera, time - 0.01, matrices)
+            candidates[f] = betas
         if not candidates:
             continue
-        matched = np.asarray(prediction.get("direct_4d_mask", prediction.get("matched_mask", prediction["valid_mask"])),
-                             dtype=bool)
-        betas = np.median([item[1] for f, item in candidates.items() if matched[f]]
-                          or [item[1] for item in candidates.values()], axis=0)
+        matched = np.asarray(prediction.get("matched_mask", prediction["valid_mask"]), dtype=bool)
+        direct = np.asarray(prediction.get("direct_4d_mask", matched), dtype=bool)
+        complete_world_roots(world_samples, matched, frame_times)
+        betas = np.median([item for f, item in candidates.items() if direct[f]] or list(candidates.values()), axis=0)
         vertices, joints, inverse = body_model.canonical(torch.tensor(betas, dtype=torch.float32))
         frames = []
         for f in sorted(cuboids):
-            default_time = camera_at(scene, "front", f)[3] - 0.01
+            default_time = frame_times[f]
             frame = {"frame_idx": f, "timestamp_s": default_time, "source_cam": None, "valid": False,
                      "pose_source": None, "root_translation": None, "root_quat_wxyz": None, "body_quats_wxyz": None}
             if f in candidates:
-                camera, _, matrices = candidates[f]
-                rot, _, _, time = camera_at(scene, camera, f)
-                matrices = matrices.copy()
-                matrices[0] = rot @ matrices[0]
+                camera, time, matrices = world_samples[f]
                 pose = Rotation.from_matrix(matrices)
                 transform = joint_transforms(torch.tensor(pose.as_matrix(), dtype=torch.float32),
                                              joints, body_model.parents) @ inverse
                 points = apply(blend(body_model.weights, transform), vertices)
                 shift = (points.amin(0) + points.amax(0)) / 2
-                translation = np.asarray(cuboids[f])[:3, 3] - shift.numpy()
+                translation = cuboid_center_at(cuboids, frame_times, f, time) - shift.numpy()
                 q = pose.as_quat()[:, [3, 0, 1, 2]]
                 frame.update(
-                    timestamp_s=time - 0.01, source_cam=camera, valid=True,
-                    pose_source="4d_humans" if matched[f] else "omnire_interpolation",
+                    timestamp_s=time, source_cam=camera, valid=True,
+                    pose_source="4d_humans" if direct[f] else "omnire_interpolation",
                     root_translation=translation.tolist(), root_quat_wxyz=q[0].tolist(),
                     body_quats_wxyz=q[1:].tolist(),
                 )

@@ -1,6 +1,7 @@
 """Resolve PandaSet on mounted Drive and stage requested scenes from a ZIP when necessary."""
 import hashlib
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -145,10 +146,18 @@ def check_scene(root, scene, cameras):
     if missing:
         raise ValueError(f"Incomplete PandaSet scene {scene} at {folder}. Missing {len(missing)} files, "
                          f"including {', '.join(missing[:5])}.")
-    for name in set(cameras) | {"front"}:
-        stamps = folder / "camera" / f"{name}_camera" / "timestamps.json"
-        if len(json.loads(stamps.read_text(encoding="utf-8"))) != FRAMES_PER_SCENE:
-            raise ValueError(f"{scene}/{name}: expected {FRAMES_PER_SCENE} timestamps in {stamps}")
+    camera_folders = [folder / "camera" / f"{name}_camera" for name in sorted(set(cameras) | {"front"})]
+    for sensor in [*camera_folders, folder / "lidar"]:
+        stamps = sensor / "timestamps.json"
+        times = json.loads(stamps.read_text(encoding="utf-8"))
+        if len(times) != FRAMES_PER_SCENE:
+            raise ValueError(f"{scene}/{sensor.name}: expected {FRAMES_PER_SCENE} timestamps in {stamps}")
+        if (any(not isinstance(time, (int, float)) or not math.isfinite(time) for time in times)
+                or any(first >= second for first, second in zip(times, times[1:]))):
+            raise ValueError(f"{scene}/{sensor.name}: timestamps must be finite and strictly increasing")
+        poses = json.loads((sensor / "poses.json").read_text(encoding="utf-8"))
+        if len(poses) != len(times):
+            raise ValueError(f"{scene}/{sensor.name}: pose count does not match timestamps")
 
 
 def prepare_input(path, mounts, staging, scenes, cameras=FRONT_CAMERAS):

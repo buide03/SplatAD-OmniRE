@@ -2,16 +2,50 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from research.compare import paired
 from research.evaluate import crop_bounds
 from research.geometry import apply, blend, joint_transforms, matrix_quat, quat_matrix, slerp
+from research.prepare import complete_world_roots, cuboid_center_at, projected_box
 from research.replay import camera_between, smooth_camera_poses
 from research.smpl_nodes import SMPLTrack
 
 
 IDENTITY = [1, 0, 0, 0]
+
+
+def test_missing_root_is_interpolated_in_world_and_preserves_local_joints():
+    from scipy.spatial.transform import Rotation
+
+    matrices = np.broadcast_to(np.eye(3), (24, 3, 3)).copy()
+    start = matrices.copy()
+    end = matrices.copy()
+    end[0] = Rotation.from_euler("z", 60, degrees=True).as_matrix()
+    missing = matrices.copy()
+    missing[0] = Rotation.from_euler("z", 160, degrees=True).as_matrix()
+    missing[1] = Rotation.from_euler("x", 20, degrees=True).as_matrix()
+    world_samples = {0: ("front_left", 0.0, start), 1: ("back", 0.05, missing), 2: ("front_right", 0.2, end)}
+    complete_world_roots(world_samples, [True, False, True], [0.0, 0.1, 0.2])
+    camera, time, corrected = world_samples[1]
+    assert camera is None and time == 0.1
+    assert np.allclose(corrected[0], Rotation.from_euler("z", 30, degrees=True).as_matrix())
+    assert np.array_equal(corrected[1:], missing[1:])
+    assert world_samples[0][2] is start and world_samples[2][2] is end
+
+
+def test_cuboid_center_uses_capture_time_and_near_plane_boxes_are_retained():
+    first, second = np.eye(4), np.eye(4)
+    second[0, 3] = 0.2
+    assert np.allclose(cuboid_center_at({0: first, 1: second}, [0.0, 0.1], 0, 0.05), [0.1, 0, 0])
+    assert np.allclose(cuboid_center_at({0: first}, [0.0, 0.1], 0, 0.05), [0, 0, 0])
+
+    camera = (np.eye(3), np.zeros(3), dict(fx=500, fy=500, cx=200, cy=200), 0.0)
+    dimensions = np.array([0.2, 0.2, 0.4])
+    assert np.allclose(projected_box([0, 0, 0.6], dimensions, 0, camera, 400, 400),
+                       [100, 100, 300, 300], atol=1)
+    assert projected_box([0, 0, -0.6], dimensions, 0, camera, 400, 400) is None
 
 
 def person(train_pose=True, transform=None, frame_ids=(0, 1, 3), time_offset=1_600_000_000.0):

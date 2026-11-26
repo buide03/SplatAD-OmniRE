@@ -12,6 +12,9 @@ from .geometry import matrix_quat, quat_matrix
 from .prepare import dump_json, front_pose_summary, read_json, sha256
 
 
+PERSON_MIN_CROP = 11  # Window size of the pinned SplatAD SSIM implementation.
+
+
 def camera_indices(manager):
     return {(p.parent.name.removesuffix("_camera"), int(p.stem)): i
             for i, p in enumerate(manager.train_dataset.image_filenames)}
@@ -57,10 +60,11 @@ def psnr_ssim(a, b, ssim):
     return {"psnr_db": -10 * mse.clamp_min(1e-12).log10(), "ssim": ssim(a, b)}
 
 
-def rgb_scores(pred, gt, lpips, ssim):
+def rgb_scores(pred, gt, lpips, ssim, lpips_context=None):
     a, b = rgb_batch(pred), rgb_batch(gt)
     scores = {metric: float(value) for metric, value in psnr_ssim(a, b, ssim).items()}
-    return {**scores, "mae": float((a - b).abs().mean()), "lpips": float(lpips(a, b))}
+    lpips_inputs = (a, b) if lpips_context is None else tuple(rgb_batch(image) for image in lpips_context)
+    return {**scores, "mae": float((a - b).abs().mean()), "lpips": float(lpips(*lpips_inputs))}
 
 
 def to_image(image):
@@ -94,7 +98,7 @@ def lidar_evidence(model, lidar, batch, observations, scene_from_world):
     outputs = model.get_lidar_outputs(lidar)
     pred = outputs["depth"].reshape(-1)[ids]
     residual = (pred - measured[:, 2]).abs()
-    keep = residual < residual.quantile(model.config.depth_loss_quantile_threshold) if len(ids) else residual.bool()
+    keep = residual <= residual.quantile(model.config.depth_loss_quantile_threshold) if residual.numel() else residual.bool()
     az, el = measured[:, :2].deg2rad().unbind(-1)
     unit = torch.stack((el.cos() * az.cos(), el.cos() * az.sin(), el.sin()), dim=-1)
     local = measured[:, 2:3] * unit + measured[:, 3:4] * batch["linear_velocities_local"]
@@ -236,7 +240,10 @@ def evaluate(pipeline, manifest, output, probes=False, write_panels=True):
             for number, row in enumerate(sorted(items, key=lambda r: r["uuid"])):
                 x1, y1, x2, y2 = crop_bounds(row["bbox_xyxy"], *gt.shape[:2])
                 roi = np.s_[y1:y2, x1:x2]
-                values = rgb_scores(pred[roi], gt[roi], lpips, model.ssim)
+                rgb_box = crop_bounds(row["bbox_xyxy"], *gt.shape[:2], minimum=PERSON_MIN_CROP)
+                rx1, ry1, rx2, ry2 = rgb_box
+                rgb_roi = np.s_[ry1:ry2, rx1:rx2]
+                values = rgb_scores(pred[rgb_roi], gt[rgb_roi], lpips, model.ssim, lpips_context=(pred[roi], gt[roi]))
                 mesh = None
                 if row["uuid"] in model.person_index:
                     person = model.people[model.person_index[row["uuid"]]]
@@ -257,7 +264,7 @@ def evaluate(pipeline, manifest, output, probes=False, write_panels=True):
                 crops.append({**row, **values, **scan_results[row["scan"], row["uuid"]],
                               "comparison_eligible": row["uuid"] in selected and (
                                   model.config.variant == "R0" or row["uuid"] in model.person_index),
-                              "crop_xyxy": [x1, y1, x2, y2], "panels": panels})
+                              "crop_xyxy": [x1, y1, x2, y2], "rgb_bbox_xyxy": rgb_box, "panels": panels})
         contacts = foot_contacts(model, manifest.get("foot_contacts", []), cameras, manager, -0.01)
         result = {"scene": manifest["scene_id"], "observations": crops, "scene_metrics": scene_metrics,
                   "coverage": manifest["coverage"], "foot_contacts": contacts}

@@ -13,13 +13,14 @@ from research.sync_video import FRONT_CAMERAS, Timeline
 def fixture_members(scene):
     result = {}
     stamps = json.dumps([frame / 10 for frame in range(FRAMES_PER_SCENE)]).encode()
+    poses = json.dumps([{} for _ in range(FRAMES_PER_SCENE)]).encode()
     for name in FRONT_CAMERAS:
         camera = f"{scene}/camera/{name}_camera"
         result[f"{camera}/intrinsics.json"] = b"{}"
-        result[f"{camera}/poses.json"] = b"[]"
+        result[f"{camera}/poses.json"] = poses
         result[f"{camera}/timestamps.json"] = stamps
         result.update({f"{camera}/{frame:02d}.jpg": b"image" for frame in range(FRAMES_PER_SCENE)})
-    result.update({f"{scene}/lidar/poses.json": b"[]", f"{scene}/lidar/timestamps.json": stamps})
+    result.update({f"{scene}/lidar/poses.json": poses, f"{scene}/lidar/timestamps.json": stamps})
     for folder in ("lidar", "annotations/cuboids"):
         result.update({f"{scene}/{folder}/{frame:02d}.pkl.gz": b"scan" for frame in range(FRAMES_PER_SCENE)})
     return result
@@ -37,6 +38,12 @@ def test_drive_reads_extracted_dataset_in_place_and_checks_last_frame(tmp_path):
     assert raw == source and scenes == ["011"] and not staging.exists()
     single = select_source(source / "011", [], "all")
     assert single == (source, ["011"])
+    lidar_stamps = source / "011/lidar/timestamps.json"
+    stamps = lidar_stamps.read_text()
+    lidar_stamps.write_text(json.dumps([0] * FRAMES_PER_SCENE))
+    with pytest.raises(ValueError, match="lidar.*strictly increasing"):
+        prepare_input(source, [], staging, ["011"])
+    lidar_stamps.write_text(stamps)
     (source / "011/camera/front_left_camera/79.jpg").unlink()
     with pytest.raises(ValueError, match="front_left_camera.*79.jpg"):
         prepare_input(source, [], staging, ["011"])

@@ -60,3 +60,33 @@ def test_quality_resume_retains_initial_values_and_discards_uncheckpointed_steps
     dump_json(sample, {"schema": 1, "scene_id": "011", "images": [{"frame": 1}]})
     with pytest.raises(ValueError, match="another run or sample set"):
         quality.QualityHistory(sample, output, "011", "R2", "run", 100)
+
+
+def test_reviewed_pedestrian_frames_preserve_global_sampling_and_use_tight_crops(tmp_path, monkeypatch):
+    from PIL import Image
+
+    scene = tmp_path / "028"
+    camera_dir = scene / "camera/front_camera"
+    camera_dir.mkdir(parents=True)
+    dump_json(camera_dir / "timestamps.json", [0.0, 0.1, 0.2])
+    for frame in range(3):
+        Image.new("RGB", (64, 64)).save(camera_dir / f"{frame:02d}.jpg")
+    review = {"scene_id": "028", "observations": [
+        {"camera": "front", "frame": 1, "uuid": "person", "bbox_xyxy": [20, 20, 30, 36], "pose_monitor": True},
+    ]}
+    monkeypatch.setattr(quality, "camera_at", lambda *args: None)
+    monkeypatch.setattr(quality, "box_records", lambda *args: [])
+    examples = quality.freeze_examples(scene, ["front"], 2, review)
+    assert [(image["frame"], image["person_only"]) for image in examples["images"]] == [(0, False), (1, True), (2, False)]
+    target = torch.zeros(64, 64, 3)
+    predicted = target.clone()
+    predicted[20:36, 19:30] = 1
+    model = SimpleNamespace(get_camera_outputs=lambda _: {"rgb": predicted, "background": None},
+                            get_gt_img=lambda image: image, composite_with_background=lambda image, _: image,
+                            ssim=lambda a, b: torch.tensor(0.5))
+    pipeline = SimpleNamespace(model=model, datamanager=None, training=False, eval=lambda: None, train=lambda mode: None)
+    monkeypatch.setattr(evaluate, "camera_indices", lambda manager: {("front", frame): frame for frame in range(3)})
+    monkeypatch.setattr(evaluate, "camera_sample", lambda manager, index: (None, target))
+    metrics = quality.measure_quality(pipeline, examples)
+    assert metrics["scene"]["samples"] == 2 and metrics["vehicle"]["samples"] == 0
+    assert metrics["person"] == {"samples": 1, "psnr_db": 0.0, "ssim": 0.5}

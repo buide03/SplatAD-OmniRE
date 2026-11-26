@@ -16,26 +16,38 @@ VEHICLES = {
 SCOPES = ("scene", "vehicle", "person")
 
 
-def freeze_examples(raw_scene, cameras, frames_per_camera):
+def freeze_examples(raw_scene, cameras, frames_per_camera, manifest=None):
     """Sample across each camera sequence independently of model predictions."""
     from PIL import Image
 
+    if manifest is not None and manifest["scene_id"] != raw_scene.name:
+        raise ValueError("Pedestrian review and RGB examples must use the same scene")
+    observations = (manifest or {}).get("observations", [])
+    reviews = {}
+    for row in observations:
+        if row.get("pose_monitor") and row["camera"] in cameras:
+            reviews.setdefault((row["camera"], row["frame"]), {})[row["uuid"]] = row["bbox_xyxy"]
     images = []
     cuboids = {}
     for camera in cameras:
         path = raw_scene / "camera" / f"{camera}_camera"
         timestamps = read_json(path / "timestamps.json")
-        frames = np.linspace(0, len(timestamps) - 1, min(frames_per_camera, len(timestamps)), dtype=int)
-        for frame in map(int, frames):
+        frames = set(map(int, np.linspace(0, len(timestamps) - 1, min(frames_per_camera, len(timestamps)), dtype=int)))
+        extra_frames = {frame for name, frame in reviews if name == camera}
+        for frame in sorted(frames | extra_frames):
             with Image.open(path / f"{frame:02d}.jpg") as image:
                 width, height = image.size
             if camera == "back":
                 height = min(820, height)
             view = camera_at(raw_scene, camera, frame)
-            if frame not in cuboids:
+            person_only = frame not in frames
+            if not person_only and frame not in cuboids:
                 cuboids[frame] = list(box_records(raw_scene, frame, VEHICLES | PEDESTRIANS))
-            crops = {}
-            for box in cuboids[frame]:
+            crops = {
+                uuid: {"scope": "person", "uuid": uuid, "label": "Pedestrian", "bbox": bounds}
+                for uuid, bounds in reviews.get((camera, frame), {}).items()
+            }
+            for box in (() if person_only else cuboids[frame]):
                 category = "person" if box["label"] in PEDESTRIANS else "vehicle"
                 center = np.array([box[f"position.{axis}"] for axis in "xyz"])
                 size = np.array([box[f"dimensions.{axis}"] for axis in "xyz"])
@@ -44,14 +56,14 @@ def freeze_examples(raw_scene, cameras, frames_per_camera):
                     uuid = str(box["uuid"])
                     crops.setdefault(uuid, {"scope": category, "uuid": uuid, "label": box["label"], "bbox": bounds})
             images.append({"camera": camera, "frame": frame, "width": width, "height": height,
-                           "crops": list(crops.values())})
-    return {"schema": 1, "scene_id": raw_scene.name, "cameras": list(cameras), "images": images}
+                           "person_only": person_only, "crops": list(crops.values())})
+    return {"schema": 2, "scene_id": raw_scene.name, "cameras": list(cameras), "images": images}
 
 
 def measure_quality(pipeline, examples):
     import torch
 
-    from .evaluate import camera_indices, camera_sample, crop_bounds, psnr_ssim, rgb_batch
+    from .evaluate import PERSON_MIN_CROP, camera_indices, camera_sample, crop_bounds, psnr_ssim, rgb_batch
 
     model = pipeline.model
     manager = pipeline.datamanager
@@ -77,9 +89,11 @@ def measure_quality(pipeline, examples):
                 if pred.shape != target.shape or pred.shape[:2] != (sample["height"], sample["width"]):
                     raise ValueError(f"RGB quality image size changed for {sample['camera']}/{sample['frame']}")
                 a, b = rgb_batch(pred), rgb_batch(target)
-                add("scene", a, b)
+                if not sample.get("person_only"):
+                    add("scene", a, b)
                 for crop in sample["crops"]:
-                    x1, y1, x2, y2 = crop_bounds(crop["bbox"], sample["height"], sample["width"])
+                    minimum = PERSON_MIN_CROP if examples.get("schema", 1) == 2 and crop["scope"] == "person" else 64
+                    x1, y1, x2, y2 = crop_bounds(crop["bbox"], sample["height"], sample["width"], minimum)
                     patch = np.s_[:, :, y1:y2, x1:x2]
                     add(crop["scope"], a[patch].contiguous(), b[patch].contiguous())
     finally:
@@ -99,7 +113,7 @@ def measure_quality(pipeline, examples):
 class QualityHistory:
     def __init__(self, sample_path, output, scene, variant, run_id, start_step):
         self.examples = read_json(sample_path)
-        if self.examples["schema"] != 1 or self.examples["scene_id"] != scene or not self.examples["images"]:
+        if self.examples["schema"] not in (1, 2) or self.examples["scene_id"] != scene or not self.examples["images"]:
             raise ValueError("Invalid frozen RGB quality samples for this scene")
         self.output = output
         self.digest = sha256(sample_path)
@@ -139,10 +153,12 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cameras", nargs="+", required=True, choices=CAMERAS)
     parser.add_argument("--frames-per-camera", type=int, default=8)
+    parser.add_argument("--manifest", type=Path, help="Include the reviewed pedestrian observations in the fixed crops")
     args = parser.parse_args()
     if args.frames_per_camera < 1:
         parser.error("--frames-per-camera must be positive")
-    examples = freeze_examples(args.raw / args.scene, list(dict.fromkeys(args.cameras)), args.frames_per_camera)
+    examples = freeze_examples(args.raw / args.scene, list(dict.fromkeys(args.cameras)), args.frames_per_camera,
+                               read_json(args.manifest) if args.manifest else None)
     dump_json(args.output, examples)
     print(f"{args.scene}: {len(examples['images'])} fixed RGB samples")
 

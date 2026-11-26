@@ -29,9 +29,11 @@ checkout() {
 
 if [[ "$profile" == "source" ]]; then
     checkout neurad_studio "$deps/neurad-studio"
-    if ! git -C "$deps/neurad-studio" apply --reverse --check "$repo/splatad.patch" 2>/dev/null; then
-        git -C "$deps/neurad-studio" apply "$repo/splatad.patch"
-    fi
+    for patch in "$repo/splatad.patch" "$repo/splatad-lidar-loss.patch"; do
+        if ! git -C "$deps/neurad-studio" apply --reverse --check "$patch" 2>/dev/null; then
+            git -C "$deps/neurad-studio" apply "$patch"
+        fi
+    done
     exit 0
 fi
 
@@ -108,7 +110,7 @@ health_probe() (
 
 signature="$(
     printf '%s\n' "$profile" "$cuda_home" "$cuda_tag"
-    sha256sum scripts/bootstrap-colab.sh versions.json splatad.patch omnire-pose.patch
+    sha256sum scripts/bootstrap-colab.sh versions.json splatad.patch splatad-lidar-loss.patch omnire-pose.patch
 )"
 ready="$venv/.research-ready"
 if [[ -z "$repair" && -f "$ready" && "$(cat "$ready")" == "$signature" ]] && health_probe; then
