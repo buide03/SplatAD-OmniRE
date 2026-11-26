@@ -22,8 +22,12 @@ fi
 mkdir -p smpl_models
 ln -sfn "$smpl" smpl_models/SMPL_NEUTRAL.pkl
 hmr_cache="$(python -c 'from third_party.Humans4D.hmr2.configs import CACHE_DIR_4DHUMANS; print(CACHE_DIR_4DHUMANS)')"
-mkdir -p "$hmr_cache/data/smpl"
+phalp_cache="$(python -c 'from phalp.configs.base import CACHE_DIR; print(CACHE_DIR)')"
+phalp_models="$phalp_cache/phalp/3D/models/smpl"
+mkdir -p "$hmr_cache/data/smpl" "$phalp_models"
 ln -sfn "$smpl" "$hmr_cache/data/smpl/SMPL_NEUTRAL.pkl"
+# PHALP checks its own cache before attempting the obsolete SMPL download.
+ln -sfn "$smpl" "$phalp_models/SMPL_NEUTRAL.pkl"
 stage="$(mktemp -d "${TMPDIR:-/tmp}/pandaset-pose-$scene.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 # The one-worker converter passes scene IDs directly. Use its normal converter with padded IDs.
