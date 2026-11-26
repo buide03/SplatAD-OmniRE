@@ -14,7 +14,6 @@ from .sync_video import FRONT_CAMERAS
 
 CAMERAS = ("front", "front_left", "front_right", "left", "right", "back")
 OMNIRE_POSE_CAMERAS = CAMERAS
-SMPL_VERSIONS = ("smpl_neutral_v1.0", "smpl_neutral_v1.1")
 PEDESTRIANS = {"Pedestrian", "Pedestrian with Object"}
 CORNERS = np.array(list(itertools.product((-0.5, 0.5), repeat=3)))
 
@@ -111,7 +110,7 @@ def validate_tracks(document, scene):
     fields = ("schema_version", "scene_id", "coordinate_system", "quaternion_order", "length_unit",
               "time_unit", "time_reference", "joint_order", "translation_definition")
     if (tuple(document.get(key) for key in fields) != expected
-            or document.get("smpl_version") not in SMPL_VERSIONS):
+            or document.get("smpl_version") not in ("smpl_neutral_v1.0", "smpl_neutral_v1.1")):
         raise ValueError("Scene, model or coordinate conventions in SMPL JSON are incompatible")
     uuids = set()
     for track in document["tracks"]:
@@ -385,7 +384,8 @@ def main():
     prepare = commands.add_parser("prepare-smpl")
     prepare.add_argument("--input", type=Path, required=True)
     prepare.add_argument("--output", type=Path, required=True)
-    prepare.add_argument("--model-version", choices=SMPL_VERSIONS, required=True)
+    prepare.add_argument("--model-version", choices=("smpl_neutral_v1.0", "smpl_neutral_v1.1"),
+                         default="smpl_neutral_v1.1")
     prepare.set_defaults(action=prepare_smpl)
     export = commands.add_parser("export-tracks")
     export.add_argument("--processed", type=Path, required=True)
