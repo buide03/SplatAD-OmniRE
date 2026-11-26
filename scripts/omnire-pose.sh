@@ -43,7 +43,7 @@ if not hasattr(inspect, "getargspec"):
     inspect.getargspec = inspect.getfullargspec
 
 stage, scene = sys.argv[1:]
-sys.argv[1:] = ["--dataset", "pandaset", "--data_root", stage, "--scene_ids", scene, "--fps", "10"]
+sys.argv[1:] = ["--dataset", "pandaset", "--data_root", stage, "--scene_ids", scene]
 runpy.run_module("datasets.tools.humanpose_process", run_name="__main__")
 PY
 test -s "$stage/$scene/humanpose/smpl.pkl"
