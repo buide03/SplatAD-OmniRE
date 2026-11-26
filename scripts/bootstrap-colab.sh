@@ -133,7 +133,7 @@ py="$venv/bin/python"
 health_probe() (
     source "$venv/activate-research" || exit 1
     case "$profile" in
-        train) "$py" -c 'import torch, torchvision; from gsplat import rasterization, lidar_rasterization; import research.train; assert torch.cuda.is_available(); print(torch.cuda.get_device_name())' ;;
+        train) "$py" -c 'import torch, torchvision; from gsplat.rendering import lidar_rasterization, rasterization; import research.train; assert torch.cuda.is_available(); print(torch.cuda.get_device_name())' ;;
         pose) "$py" -c 'import torch, torchvision, cv2; from pytorch3d import _C; import phalp; assert torch.cuda.is_available()' ;;
         convert) "$py" -c 'import numpy, scipy; from importlib.util import find_spec; assert find_spec("chumpy") is not None' ;;
     esac
