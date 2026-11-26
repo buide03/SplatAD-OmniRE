@@ -1,0 +1,45 @@
+diff --git a/neural_renderer/cuda/create_texture_image_cuda_kernel.cu b/neural_renderer/cuda/create_texture_image_cuda_kernel.cu
+--- a/neural_renderer/cuda/create_texture_image_cuda_kernel.cu
++++ b/neural_renderer/cuda/create_texture_image_cuda_kernel.cu
+@@ -133,2 +133,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(image.type(), "create_texture_image_cuda", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "create_texture_image_cuda", ([&] {
+       create_texture_image_cuda_kernel<scalar_t><<<blocks, threads>>>(
+@@ -150,2 +150,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(image.type(), "create_texture_image_boundary", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "create_texture_image_boundary", ([&] {
+       create_texture_image_boundary_cuda_kernel<scalar_t><<<blocks, threads>>>(
+diff --git a/neural_renderer/cuda/load_textures_cuda_kernel.cu b/neural_renderer/cuda/load_textures_cuda_kernel.cu
+--- a/neural_renderer/cuda/load_textures_cuda_kernel.cu
++++ b/neural_renderer/cuda/load_textures_cuda_kernel.cu
+@@ -134,2 +134,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(image.type(), "load_textures_cuda", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "load_textures_cuda", ([&] {
+       load_textures_cuda_kernel<scalar_t><<<blocks, threads>>>(
+diff --git a/neural_renderer/cuda/rasterize_cuda_kernel.cu b/neural_renderer/cuda/rasterize_cuda_kernel.cu
+--- a/neural_renderer/cuda/rasterize_cuda_kernel.cu
++++ b/neural_renderer/cuda/rasterize_cuda_kernel.cu
+@@ -669,2 +669,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(faces.type(), "forward_face_index_map_cuda_1", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(faces.scalar_type(), "forward_face_index_map_cuda_1", ([&] {
+       forward_face_index_map_cuda_kernel_1<scalar_t><<<blocks_1, threads>>>(
+@@ -688,2 +688,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(faces.type(), "forward_face_index_map_cuda_2", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(faces.scalar_type(), "forward_face_index_map_cuda_2", ([&] {
+       forward_face_index_map_cuda_kernel_2<scalar_t><<<blocks_2, threads_per_block>>>(
+@@ -734,2 +734,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(faces.type(), "forward_texture_sampling_cuda", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(faces.scalar_type(), "forward_texture_sampling_cuda", ([&] {
+       forward_texture_sampling_cuda_kernel<scalar_t><<<blocks, threads>>>(
+@@ -776,2 +776,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(faces.type(), "backward_pixel_map_cuda", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(faces.scalar_type(), "backward_pixel_map_cuda", ([&] {
+       backward_pixel_map_cuda_kernel<scalar_t><<<blocks, threads>>>(
+@@ -814,2 +814,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(sampling_weight_map.type(), "backward_textures_cuda", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(sampling_weight_map.scalar_type(), "backward_textures_cuda", ([&] {
+       backward_textures_cuda_kernel<scalar_t><<<blocks, threads>>>(
+@@ -849,2 +849,2 @@
+-    AT_DISPATCH_FLOATING_TYPES(faces.type(), "backward_depth_map_cuda", ([&] {
++    AT_DISPATCH_FLOATING_TYPES(faces.scalar_type(), "backward_depth_map_cuda", ([&] {
+       backward_depth_map_cuda_kernel<scalar_t><<<blocks, threads>>>(

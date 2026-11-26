@@ -18,6 +18,10 @@
     "url": "https://github.com/brjathu/PHALP.git",
     "commit": "96f7e6c09fb858ec3f597d59246c151ab4394bc3"
   },
+  "neural_renderer": {
+    "url": "https://github.com/shubham-goel/NMR.git",
+    "commit": "e990b3c70f48d39231f607c79d76ce3db4bf7483"
+  },
   "pytorch3d": {
     "url": "https://github.com/facebookresearch/pytorch3d.git",
     "commit": "f99655c4fc6c28bd13d141219581bf3e73df60a4"

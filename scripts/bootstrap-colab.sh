@@ -134,7 +134,7 @@ health_probe() (
     source "$venv/activate-research" || exit 1
     case "$profile" in
         train) "$py" -c 'import torch, torchvision; from gsplat.rendering import lidar_rasterization, rasterization; import research.train; assert torch.cuda.is_available(); print(torch.cuda.get_device_name())' ;;
-        pose) "$py" -c 'import torch, torchvision, cv2; from pytorch3d import _C; import phalp; assert torch.cuda.is_available()' ;;
+        pose) "$py" -c 'import torch, torchvision, cv2; from neural_renderer.cuda import create_texture_image, load_textures, rasterize; from pytorch3d import _C; import phalp; assert torch.cuda.is_available()' ;;
         convert) "$py" -c 'import numpy, scipy; from importlib.util import find_spec; assert find_spec("chumpy") is not None' ;;
     esac
 )
@@ -142,6 +142,9 @@ health_probe() (
 signature="$(
     printf '%s\n' "$profile" "$cuda_home" "$cuda_tag"
     sha256sum scripts/bootstrap-colab.sh versions.json splatad.patch splatad-lidar-loss.patch omnire-pose.patch
+    if [[ "$profile" == "pose" ]]; then
+        sha256sum neural-renderer-torch.patch
+    fi
 )"
 ready="$venv/.research-ready"
 if [[ -z "$repair" && -f "$ready" && "$(cat "$ready")" == "$signature" ]] && health_probe; then
@@ -169,10 +172,19 @@ case "$profile" in
         fi
         git -C "$deps/omnire" submodule update --init --recursive third_party/Humans4D
         [[ "$(git -C "$deps/omnire/third_party/Humans4D" rev-parse HEAD)" == "$(pin humans4d commit)" ]]
+        renderer="$deps/neural-renderer"
+        checkout neural_renderer "$renderer"
+        if ! git -C "$renderer" apply --reverse --check "$repo/neural-renderer-torch.patch" 2>/dev/null; then
+            git -C "$renderer" apply "$repo/neural-renderer-torch.patch"
+        fi
         install_torch "$py"
         uv pip install --python "$py" 'setuptools<70' wheel ninja pip 'numpy<2'
         printf 'numpy<2\ntorch==2.7.1+%s\ntorchvision==0.22.1+%s\n' "$cuda_tag" "$cuda_tag" > "$deps/pose-constraints.txt"
+        # PHALP pins the unpatched Git URL, so override its transitive source.
+        renderer_uri="$("$python" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).as_uri())' "$renderer")"
+        printf 'neural-renderer-pytorch @ %s\n' "$renderer_uri" > "$deps/pose-overrides.txt"
         uv pip install --python "$py" --no-build-isolation -c "$deps/pose-constraints.txt" \
+            --overrides "$deps/pose-overrides.txt" \
             "git+$(pin phalp url)@$(pin phalp commit)" \
             "git+$(pin pytorch3d url)@$(pin pytorch3d commit)" \
             "git+https://github.com/ziyc/pandaset-devkit.git@0c10f2b03bc00b9c77950f86e478e271edba2c00#subdirectory=python" \
