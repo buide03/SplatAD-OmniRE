@@ -16,8 +16,11 @@ PERSON_MIN_CROP = 11  # Window size of the pinned SplatAD SSIM implementation.
 
 
 def camera_indices(manager):
-    return {(p.parent.name.removesuffix("_camera"), int(p.stem)): i
-            for i, p in enumerate(manager.train_dataset.image_filenames)}
+    indices = {}
+    for index, filename in enumerate(manager.train_dataset.image_filenames):
+        path = Path(filename)
+        indices[path.parent.name.removesuffix("_camera"), int(path.stem)] = index
+    return indices
 
 
 def camera_sample(manager, index, with_image=True):

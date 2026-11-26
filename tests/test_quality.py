@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,11 +29,18 @@ def test_quality_measures_full_image_and_separate_vehicle_and_person_crops(monke
 
     model.ssim = ssim
     model.get_camera_outputs = render
-    pipeline = SimpleNamespace(model=model, datamanager=None, training=True)
+    dataset = SimpleNamespace(image_filenames=[
+        Path("030/camera/front_left_camera/08.jpg"), "030/camera/front_camera/08.jpg",
+    ])
+    pipeline = SimpleNamespace(model=model, datamanager=SimpleNamespace(train_dataset=dataset), training=True)
     pipeline.eval = lambda: setattr(pipeline, "training", False)
     pipeline.train = lambda mode: setattr(pipeline, "training", mode)
-    monkeypatch.setattr(evaluate, "camera_indices", lambda manager: {("front", 8): 0})
-    monkeypatch.setattr(evaluate, "camera_sample", lambda manager, index: (None, target))
+
+    def sample_camera(manager, index):
+        assert index == 1
+        return None, target
+
+    monkeypatch.setattr(evaluate, "camera_sample", sample_camera)
     examples = {"images": [{"camera": "front", "frame": 8, "width": 128, "height": 64, "crops": [
         {"scope": "vehicle", "bbox": [0, 0, 64, 64]}, {"scope": "person", "bbox": [64, 0, 128, 64]},
     ]}]}
