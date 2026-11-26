@@ -321,7 +321,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--seed-points", type=int, default=250000)
     parser.add_argument("--far-points", type=int, default=80000)
-    parser.add_argument("--downscales", type=int, default=1)
+    parser.add_argument("--downscales", type=int, default=0,
+                        help="Initial RGB downscaling stages. Use 0 for native training resolution.")
     parser.add_argument("--cameras", nargs="+", default=["front_right"])
     parser.add_argument("--resume", type=Path, help="Trusted config.yml from the existing run")
     parser.add_argument("--checkpoint", type=Path, help="Trusted checkpoint for resume")
