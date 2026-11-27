@@ -28,7 +28,7 @@ class PedestrianGaussians(nn.Module):
             influence = (-torch.cdist(normalized, anchors).square() / 0.08).softmax(-1)
             # Global displacement already comes from the cuboid trajectory.
             centered = influence - influence.mean(0)
-            self.register_buffer("influence", centered / centered.abs().sum(-1, keepdim=True).clamp_min(1))
+            self.register_buffer("influence", centered / centered.abs().sum(-1).max().clamp_min(1))
             self.offsets = nn.Parameter(seed["means"].new_zeros(len(times), len(anchors), 3))
         else:
             self.register_parameter("offsets", None)

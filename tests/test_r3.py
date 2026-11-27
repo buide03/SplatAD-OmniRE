@@ -42,6 +42,7 @@ def test_deformation_moves_local_regions_and_backpropagates():
     with torch.no_grad():
         node.offsets[1, 2, 1] = 0.5
     updated = node.get_gaussians_at(time, box, torch.zeros(6), True)
+    assert torch.allclose(updated["means"].mean(0), original["means"].mean(0))
     assert updated["means"][0, 1] > original["means"][0, 1]
     assert updated["means"][1, 1] < original["means"][1, 1]
     assert updated["velocities"][0, 1] > 0
