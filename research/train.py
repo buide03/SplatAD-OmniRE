@@ -1,4 +1,4 @@
-"""Train the fixed-Gaussian R0/R1/R2 research preset on one Colab GPU."""
+"""Train SplatAD and the pedestrian research variants on one Colab GPU."""
 import argparse
 import copy
 import json
@@ -21,7 +21,9 @@ from nerfstudio.models.splatad import SplatADModelConfig
 from nerfstudio.scripts.train import main as launch
 
 from .colab import complete_checkpoint
-from .model import POSE_GROUPS, PedestrianModelConfig
+from .deformable import GAUSSIAN_PARAMETERS
+from .evaluate import camera_indices
+from .model import POSE_GROUPS, SMPL_VARIANTS, TRAINABLE_POSE_VARIANTS, PedestrianModelConfig
 from .pose_monitor import POSE_ATTRS, PoseMonitor, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
 from .quality import QualityHistory
@@ -95,6 +97,13 @@ class ResearchTrainer(Trainer):
             print(f"Background: {model.background_seeds:,} LiDAR seeds and {model.background_gaussians:,} Gaussians")
             for row in model.actor_routes:
                 print(row)
+        if getattr(model.config, "variant", None) == "R3" and model.config.person_rgb_weight:
+            indices = camera_indices(self.pipeline.datamanager)
+            constrained = {row["uuid"] for row in model.actor_routes if row["representation"] in ("smpl", "deformable")}
+            for row in read_json(model.config.manifest_path)["observations"]:
+                idx = indices.get((row["camera"], row["frame"]))
+                if idx is not None and row["usable"] and row["uuid"] in constrained:
+                    model.person_regions.setdefault(idx, []).append(tuple(map(int, row["bbox_xyxy"])))
         dump_json(self.base_dir / "environment.json", {
             "torch": torch.__version__, "torch_cuda": torch.version.cuda,
             "gpu": torch.cuda.get_device_name(), "seed": self.config.machine.seed,
@@ -220,7 +229,7 @@ class ResearchTrainer(Trainer):
             return
         start = perf_counter()
         rates = []
-        if self.pipeline.model.config.variant == "R2":
+        if self.pipeline.model.config.variant in TRAINABLE_POSE_VARIANTS:
             rates = [self.optimizers.optimizers[name].param_groups[0]["lr"] for name in POSE_GROUPS]
         self.pose_monitor.capture(step, rates)
         self.monitor_seconds += perf_counter() - start
@@ -306,8 +315,15 @@ def make_config(args):
             tracks_path=args.tracks.resolve() if args.tracks else None,
             body_path=args.body.resolve() if args.body else None,
             manifest_path=manifest, manifest_digest=sha256(manifest) if manifest else "",
+            pedestrian_mcmc=bool(args.mcmc_cap), far_deformation=args.far_deformation,
+            ground_path=args.ground.resolve() if args.ground else None,
+            ground_digest=sha256(args.ground) if args.ground else "", ground_prefit=args.ground_prefit,
+            joint_smooth_weight=args.joint_smooth_weight, contact_weight=args.contact_weight, slip_weight=args.slip_weight,
+            person_rgb_weight=args.person_rgb_weight,
         )
         config.pipeline.model.actor_flip_probability = 0.0
+        if args.mcmc_cap:
+            config.pipeline.model.mcmc_cap_max = args.mcmc_cap
     config.pipeline.calc_fid_steps = ()
     datamanager = config.pipeline.datamanager
     datamanager.cache_images = datamanager.cache_lidars = "cpu"
@@ -317,10 +333,14 @@ def make_config(args):
     if args.variant != "SplatAD":
         datamanager.dataparser.include_deformable_actors = True
     datamanager.dataparser.train_split_fraction = 1.0
-    if args.variant in ("R1", "R2"):
-        for name in ("means", "quats", "scales", "opacities", "features_dc", "features_rest"):
+    if args.variant in SMPL_VARIANTS:
+        for name in GAUSSIAN_PARAMETERS:
             config.optimizers[f"smpl_{name}"] = copy.deepcopy(config.optimizers[name])
-    if args.variant == "R2":
+    if args.variant == "R3" and (args.mcmc_cap or args.far_deformation):
+        for name in GAUSSIAN_PARAMETERS:
+            config.optimizers[f"pedestrian_{name}"] = copy.deepcopy(config.optimizers[name])
+        config.optimizers["pedestrian_deformation"] = {"optimizer": AdamOptimizerConfig(lr=1e-3), "scheduler": None}
+    if args.variant in TRAINABLE_POSE_VARIANTS:
         for name, lr in zip(POSE_GROUPS, (3e-4, 2e-4, 2e-4), strict=True):
             config.optimizers[name] = {"optimizer": AdamOptimizerConfig(lr=lr), "scheduler": None}
     return config
@@ -330,10 +350,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", type=Path)
     parser.add_argument("--scene", default="011")
-    parser.add_argument("--variant", choices=("SplatAD", "R0", "R1", "R2"), default="R2")
+    parser.add_argument("--variant", choices=("SplatAD", "R0", *SMPL_VARIANTS), default="R2")
     parser.add_argument("--tracks", type=Path)
     parser.add_argument("--body", type=Path)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--mcmc-cap", type=int, default=0, help="R3 MCMC cap for background and rigid non-pedestrian actors")
+    parser.add_argument("--far-deformation", action="store_true", help="R3 local deformation for far pedestrian tracks")
+    parser.add_argument("--ground", type=Path, help="R3 local ground planes from research.ground")
+    parser.add_argument("--ground-prefit", action="store_true", help="Apply a bounded vertical fit before R3 optimization")
+    parser.add_argument("--joint-smooth-weight", type=float, default=0.02)
+    parser.add_argument("--contact-weight", type=float, default=0.1)
+    parser.add_argument("--slip-weight", type=float, default=0.1)
+    parser.add_argument("--person-rgb-weight", type=float, default=0.15, help="R3 RGB supervision in pedestrian cuboid crops")
     parser.add_argument("--output", type=Path, default=Path("runs"))
     parser.add_argument("--run-id", default="{timestamp}")
     parser.add_argument("--steps", type=int, default=200, help="Number of iterations to execute in this session")
@@ -364,6 +392,13 @@ def main():
         parser.error("The pose monitor interval must be nonnegative")
     if args.quality_every is not None and args.quality_every < 0:
         parser.error("The RGB quality interval must be nonnegative")
+    if args.mcmc_cap < 0 or any(not 0 <= value < float("inf") for value in
+                              (args.joint_smooth_weight, args.contact_weight, args.slip_weight, args.person_rgb_weight)):
+        parser.error("MCMC cap and loss weights must be nonnegative")
+    if (args.mcmc_cap or args.far_deformation or args.ground or args.ground_prefit) and (args.resume or args.variant != "R3"):
+        parser.error("Set R3 research options when starting a new R3 run. Resume uses the saved configuration.")
+    if args.ground_prefit and not args.ground:
+        parser.error("--ground-prefit requires --ground")
     if args.resume:
         if not args.checkpoint:
             parser.error("--resume requires --checkpoint")
@@ -388,8 +423,8 @@ def main():
         if args.quality_every is not None:
             config.quality_interval = args.quality_every
     else:
-        if args.raw is None or (args.variant in ("R1", "R2") and not all((args.tracks, args.body, args.manifest))):
-            parser.error("Supply --raw and, for R1/R2, --tracks, --body and --manifest")
+        if args.raw is None or (args.variant in SMPL_VARIANTS and not all((args.tracks, args.body, args.manifest))):
+            parser.error("Supply --raw and, for R1/R2/R3, --tracks, --body and --manifest")
         config = make_config(args)
         existing = config.get_checkpoint_dir()
         if config.timestamp != "{timestamp}" and any(complete_checkpoint(path) for path in existing.glob("step-*.ckpt")):

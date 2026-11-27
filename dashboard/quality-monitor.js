@@ -60,8 +60,10 @@
     const models = runs.filter(run => run.variant !== "SplatAD");
     const model = models.findLast(run => render && run.run_id === render.run_id && run.variant === render.variant)
       ?? models.findLast(run => run.variant === "R2") ?? models.at(-1);
-    const control = runs.findLast(run => run.variant === "SplatAD" &&
-      (!model || (run.run_id === model.run_id && run.quality_sha256 === model.quality_sha256)));
+    const controls = runs.filter(run => run.variant === "SplatAD" &&
+      (!model || (run.scene === model.scene && run.quality_sha256 === model.quality_sha256)));
+    const control = controls.findLast(run => !model || run.run_id === model.run_id)
+      ?? (model?.variant === "R3" ? controls.at(-1) : undefined);
     const key = [model, control].map(run => run ? `${run.path}/${run.step}/${run.snapshots}` : "").join("|");
     if (key === requestKey) return;
     requestKey = key;

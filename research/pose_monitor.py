@@ -136,6 +136,8 @@ def measure_rgb(model, camera, image, person, row, include_initial=True):
     if point_errors["keypoint_count"] != len(labels):
         point_errors.update(reprojection_mae_px=None, reprojection_initial_mae_px=None)
     metrics.update(point_errors)
+    if visible and hasattr(person, "constraints"):
+        metrics.update(person.constraints.measure(person, capture_time))
     panels = {
         "reference": reference_image[roi].copy(),
         "current": overlay(reference_image, xy_current, visible, person.faces, (100, 246, 181))[roi].copy(),

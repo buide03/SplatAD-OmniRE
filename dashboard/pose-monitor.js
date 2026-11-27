@@ -158,6 +158,13 @@
     if (Number.isFinite(values.rgb_mae)) {
       fit.push(["RGB MAE vùng người ↓", decimal(values.rgb_mae, 5), measuredOnMask ? "Đo trên mask người" : "Đo trên bbox cố định"]);
     }
+    for (const [side, label] of [["left", "Chân trái"], ["right", "Chân phải"]]) {
+      const height = values[`${side}_foot_height_cm`];
+      if (Number.isFinite(height)) {
+        const stance = values[`${side}_foot_stance`] ? " · chân chống ước lượng" : "";
+        fit.push([label, `${decimal(height, 1)} cm`, `Độ cao so với mặt đường LiDAR${stance}`]);
+      }
+    }
     metrics(byId("pose-fit"), fit);
     note("pose-roi", reference.limbs_visible === false && !measuredOnMask ? "Vùng RGB gồm cả vật che." : "");
     drawHistory(series, key);

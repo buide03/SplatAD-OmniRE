@@ -94,7 +94,7 @@ class SMPLTrack(nn.Module):
             pose = slerp(pose, q[other], alpha)
             shift = shift.lerp(translation[other], alpha) if shift_override is None else shift_override
         transform = joint_transforms(quat_matrix(pose), self.joints, self.parents) @ self.inverse_canonical
-        return torch.cat((transform[..., :3, :3], transform[..., :3, 3:] + shift[:, None]), dim=-1)
+        return torch.cat((transform[..., :3, :3], transform[..., :3, 3:] + shift[..., None, :, None]), dim=-1)
 
     def mesh_at(self, time, initial=False):
         lo, hi, alpha, visible = self._span(time.to(self.times).reshape(()))
