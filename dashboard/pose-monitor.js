@@ -1,11 +1,15 @@
 (() => {
   const observation = byId("pose-observation");
+  const modelSelect = byId("pose-model");
+  const cameraNames = {...cameraLabels, left: "Trái", right: "Phải", back: "Sau"};
+  const modelOrder = ["R3", "R2", "OmniRe"];
   const results = byId("pose-results");
   const status = byId("pose-status");
-  const panelLabels = {reference: "RGB gốc", initial: "Mesh khởi tạo", current: "Mesh hiệu chỉnh"};
+  const panelLabels = {reference: "RGB gốc", initial: "Mesh khởi tạo", current: "Mesh hiệu chỉnh", render: "Render"};
   const groupLabels = {translation: "Tịnh tiến gốc", root: "Xoay gốc", body: "Xoay khớp"};
   const probeMessages = {
     frozen: "Pose cố định.",
+    tracked: "Quan sát theo dõi mesh. Bước thử chỉ chạy trên quan sát đã duyệt.",
     pose_unavailable: "Frame nằm ngoài đoạn pose hợp lệ.",
     non_finite_loss: "Loss RGB không hữu hạn.",
     non_finite_gradient: "Gradient không hữu hạn.",
@@ -85,6 +89,24 @@
     }
   }
 
+  function span(value) {
+    if (!Number.isFinite(value?.mean)) return "—";
+    const unit = value.unit === "deg" ? "°" : ` ${value.unit}`;
+    return `${decimal(value.mean, 2)} / ${decimal(value.max, 2)}${unit}`;
+  }
+
+  function drawDrift(series, uuid) {
+    const body = byId("pose-drift");
+    body.replaceChildren();
+    for (const entry of series) {
+      const track = entry.tracks?.[uuid];
+      if (!track) continue;
+      row(body, [decimal(entry.step, 0), span(track.translation), span(track.root), span(track.body),
+        span(track.box_translation), span(track.box_rotation)])
+        .classList.toggle("selected", entry.step === step);
+    }
+  }
+
   function drawProbe(active) {
     const values = active.metrics;
     const probe = active.pose_only_rgb_probe ?? {};
@@ -134,7 +156,7 @@
     const values = active.metrics;
     const measuredOnMask = values.roi_source === "manual_silhouette";
     byId("pose-detail").textContent =
-      `${cameraLabels[reference.camera]} · Frame ${reference.frame} · Bước ${step}`;
+      `${record.variant} · ${cameraNames[reference.camera] ?? reference.camera} · Frame ${reference.frame} · Bước ${step}`;
     const gallery = byId("pose-panels");
     gallery.replaceChildren();
     for (const [name, label] of Object.entries(panelLabels)) {
@@ -158,9 +180,17 @@
     if (Number.isFinite(values.rgb_mae)) {
       fit.push(["RGB MAE vùng người ↓", decimal(values.rgb_mae, 5), measuredOnMask ? "Đo trên mask người" : "Đo trên bbox cố định"]);
     }
+    for (const [side, label] of [["left", "Chân trái"], ["right", "Chân phải"]]) {
+      const height = values[`${side}_foot_height_cm`];
+      if (Number.isFinite(height)) {
+        const stance = values[`${side}_foot_stance`] ? " · chân chống ước lượng" : "";
+        fit.push([label, `${decimal(height, 1)} cm`, `Độ cao so với mặt đường LiDAR${stance}`]);
+      }
+    }
     metrics(byId("pose-fit"), fit);
     note("pose-roi", reference.limbs_visible === false && !measuredOnMask ? "Vùng RGB gồm cả vật che." : "");
     drawHistory(series, key);
+    drawDrift(series, reference.uuid);
     drawProbe(active);
   }
 
@@ -172,9 +202,17 @@
   async function update(event) {
     media = event.detail;
     const {source, render, monitors} = event.detail;
-    const eligible = render ? monitors.filter(run => run.run_id === render.run_id && run.variant === render.variant) : monitors;
-    const chosen = eligible.findLast(run => run.variant === "R2") ?? eligible.at(-1);
-    drawExtraction(render?.variant === "R0" ? null : render?.pose_summary ?? chosen?.pose_summary ?? source?.pose_summary);
+    // R2, R3 and OmniRe of the same run share the observations, so the model can be switched in place.
+    const runId = monitors.some(run => run.run_id === render?.run_id) ? render.run_id : monitors.at(-1)?.run_id;
+    const eligible = monitors.filter(run => run.run_id === runId);
+    const variants = [...new Set(eligible.map(run => run.variant))]
+      .sort((a, b) => (modelOrder.indexOf(a) + 1 || 99) - (modelOrder.indexOf(b) + 1 || 99));
+    const wanted = variants.includes(modelSelect.value) ? modelSelect.value
+      : variants.includes(render?.variant) ? render.variant : variants[0];
+    options(modelSelect, variants.map(name => [name, name]), wanted, "Chưa có mô hình");
+    modelSelect.hidden = variants.length < 2;
+    const chosen = eligible.findLast(run => run.variant === modelSelect.value);
+    drawExtraction(render?.variant === "SplatAD" ? null : render?.pose_summary ?? chosen?.pose_summary ?? source?.pose_summary);
     const next = chosen ? `${chosen.path}/${chosen.step}/${chosen.snapshots}` : "";
     if (selectionKey === next) {
       drawJump(data?.observations[observation.value]);
@@ -200,8 +238,8 @@
       if (updateIndex !== revision) return;
       data = report;
       if (followLatest || step == null) step = data.steps.at(-1)?.step;
-      const entries = Object.entries(data.observations).filter(([, ref]) => ref.camera in cameraLabels)
-        .map(([key, ref]) => [key, `${cameraLabels[ref.camera]} · Frame ${ref.frame} · ${ref.uuid.slice(0, 8)}`]);
+      const entries = Object.entries(data.observations)
+        .map(([key, ref]) => [key, `${cameraNames[ref.camera] ?? ref.camera} · Frame ${ref.frame} · ${ref.uuid.slice(0, 8)}`]);
       options(observation, entries, formerObservation, "Chưa có quan sát");
       draw();
     } catch {
@@ -212,6 +250,7 @@
   }
 
   observation.addEventListener("change", draw);
+  modelSelect.addEventListener("change", () => update({detail: media}));
   byId("pose-jump").addEventListener("click", () => {
     const reference = data?.observations[observation.value];
     if (reference) window.dispatchEvent(new CustomEvent("splatad:jump", {detail: reference}));

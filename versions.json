@@ -25,5 +25,17 @@
   "pytorch3d": {
     "url": "https://github.com/facebookresearch/pytorch3d.git",
     "commit": "f99655c4fc6c28bd13d141219581bf3e73df60a4"
+  },
+  "gsplat_omnire": {
+    "url": "https://github.com/nerfstudio-project/gsplat.git",
+    "commit": "507f26e118afb78ef0224ad5e0d0701f1b973853"
+  },
+  "nvdiffrast": {
+    "url": "https://github.com/NVlabs/nvdiffrast.git",
+    "commit": "253ac4fcea7de5f396371124af597e6cc957bfae"
+  },
+  "segformer": {
+    "model": "nvidia/segformer-b5-finetuned-cityscapes-1024-1024",
+    "commit": "2c6f153e4c23c229e2fa2b188eb250607e030cd8"
   }
 }

@@ -1,4 +1,4 @@
-"""Compute paired R0/R1/R2 summaries on identical SMPL-covered observations."""
+"""Compute paired R2/R3 summaries on identical SMPL-covered observations."""
 import argparse
 import csv
 from collections import defaultdict
@@ -77,12 +77,13 @@ def main():
         for bin_name in ("near", "mid", "far"):
             for metric in METRICS:
                 common_keys = None
-                baseline_comparison = all(name in variants for name in ("R0", "R1", "R2")) and "/" not in a + b
-                if baseline_comparison and metric != "reprojection_mae_px":
+                paired_variants = [name for name in variants if "/" not in name]
+                if len(paired_variants) > 2 and "/" not in a + b and metric != "reprojection_mae_px":
+                    # Every checkpoint pair is scored on the same observations.
                     common_keys = set.intersection(*[
                         {key(row) for row in variants[name] if row["smpl_valid"]
                          and row.get("comparison_eligible", True) and row.get(metric) is not None}
-                        for name in ("R0", "R1", "R2")
+                        for name in paired_variants
                     ])
                 comparisons.append({
                     "comparison": f"{a} → {b}", **paired(variants[a], variants[b], metric, bin_name, common_keys)

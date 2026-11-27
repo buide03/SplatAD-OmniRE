@@ -127,14 +127,15 @@ def main():
         parser.error("Use 1–120 FPS, a scale in (0,1], and a CRF in [0,51]")
     config, pipeline, checkpoint, step = load_checkpoint(args.config.resolve(), args.checkpoint)
     if args.interpolation == "smooth":
-        for person in pipeline.model.people:
+        for person in getattr(pipeline.model, "people", ()):
             person.prepare_smooth_replay()
     mode = "zero_smpl_velocity" if args.zero_smpl_velocity else "checkpoint"
     pipeline.model.human_motion = not args.zero_smpl_velocity
-    manifest_path = args.manifest or config.pipeline.model.manifest_path
+    manifest_path = args.manifest or getattr(config.pipeline.model, "manifest_path", None)
     if not manifest_path:
         parser.error("Provide the frozen manifest")
-    if config.pipeline.model.manifest_digest and config.pipeline.model.manifest_digest != sha256(manifest_path):
+    digest = getattr(config.pipeline.model, "manifest_digest", "")
+    if digest and digest != sha256(manifest_path):
         parser.error("The selected manifest differs from the one used in training")
     args.output.mkdir(parents=True, exist_ok=True)
     metadata_path = args.output / "run.json"

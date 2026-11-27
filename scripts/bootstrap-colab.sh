@@ -40,8 +40,9 @@ fi
 case "$profile" in
     train) python_version=3.12; venv="$deps/train-env" ;;
     pose) python_version=3.10; venv="$deps/pose-env" ;;
+    omnire) python_version=3.10; venv="$deps/omnire-env" ;;
     convert) python_version=3.10; venv="$deps/smpl-convert" ;;
-    *) echo "Usage: bash scripts/bootstrap-colab.sh [source|train|pose|convert] [--repair]" >&2; exit 2 ;;
+    *) echo "Usage: bash scripts/bootstrap-colab.sh [source|train|pose|omnire|convert] [--repair]" >&2; exit 2 ;;
 esac
 if [[ -n "$repair" && "$repair" != "--repair" ]]; then
     echo "Unknown bootstrap option: $repair" >&2
@@ -135,6 +136,7 @@ health_probe() (
     case "$profile" in
         train) "$py" -c 'import torch, torchvision; from gsplat.rendering import lidar_rasterization, rasterization; import research.train; assert torch.cuda.is_available(); print(torch.cuda.get_device_name())' ;;
         pose) "$py" -c 'import torch, torchvision, cv2; from neural_renderer.cuda import create_texture_image, load_textures, rasterize; from pytorch3d import _C; import phalp; assert torch.cuda.is_available()' ;;
+        omnire) cd "$deps/omnire" && PYTHONPATH="$deps/omnire:$repo" "$py" -c 'import torch, smplx, transformers, nvdiffrast.torch; from pytorch3d import _C; from gsplat.cuda._backend import _C as gsplat_C; from models.trainers import MultiTrainer; from datasets.driving_dataset import DrivingDataset; assert torch.cuda.is_available() and gsplat_C is not None' ;;
         convert) "$py" -c 'import numpy, scipy; from importlib.util import find_spec; assert find_spec("chumpy") is not None' ;;
     esac
 )
@@ -144,6 +146,9 @@ signature="$(
     sha256sum scripts/bootstrap-colab.sh versions.json splatad.patch splatad-lidar-loss.patch omnire-pose.patch
     if [[ "$profile" == "pose" ]]; then
         sha256sum neural-renderer-torch.patch
+    fi
+    if [[ "$profile" == "omnire" ]]; then
+        nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1
     fi
 )"
 ready="$venv/.research-ready"
@@ -189,6 +194,23 @@ case "$profile" in
             "git+$(pin pytorch3d url)@$(pin pytorch3d commit)" \
             "git+https://github.com/ziyc/pandaset-devkit.git@0c10f2b03bc00b9c77950f86e478e271edba2c00#subdirectory=python" \
             "$deps/omnire/third_party/Humans4D[all]" chumpy scipy imageio-ffmpeg omegaconf joblib
+        ;;
+    omnire)
+        # Official OmniRe training stack: DriveStudio requirements and gsplat v1.3.0, on the Colab PyTorch.
+        checkout omnire "$deps/omnire"
+        checkout gsplat_omnire "$deps/gsplat-omnire"
+        git -C "$deps/gsplat-omnire" submodule update --init --recursive
+        checkout nvdiffrast "$deps/nvdiffrast"
+        install_torch "$py"
+        uv pip install --python "$py" 'setuptools<70' wheel ninja pip 'numpy<2'
+        printf 'torch==2.7.1+%s
+torchvision==0.22.1+%s
+' "$cuda_tag" "$cuda_tag" > "$deps/omnire-overrides.txt"
+        grep -vE '^(--extra-index-url|torch==|torchvision==|xformers==)' "$deps/omnire/requirements.txt" > "$deps/omnire-requirements.txt"
+        uv pip install --python "$py" --no-build-isolation --overrides "$deps/omnire-overrides.txt"             -r "$deps/omnire-requirements.txt" "transformers==4.46.3" joblib pandas
+        # Compile the CUDA kernels once for the attached GPU.
+        arch="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)"
+        TORCH_CUDA_ARCH_LIST="$arch" uv pip install --python "$py" --no-build-isolation             --overrides "$deps/omnire-overrides.txt"             "$deps/gsplat-omnire" "$deps/nvdiffrast" "git+$(pin pytorch3d url)@$(pin pytorch3d commit)"             "git+https://github.com/ziyc/pandaset-devkit.git@0c10f2b03bc00b9c77950f86e478e271edba2c00#subdirectory=python"             -e "$deps/omnire/third_party/smplx"
         ;;
     convert)
         uv pip install --python "$py" 'setuptools<70' wheel pip

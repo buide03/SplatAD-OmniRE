@@ -48,7 +48,7 @@ select { appearance: none; background: var(--surface); background-image: linear-
 .video-toolbar { padding: 2px 2px 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px }
 .video-options { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 5px 10px; min-width: 0 }
 #video-fps { color: var(--muted); font: 600 12px var(--mono); white-space: nowrap }
-.tabs { display: flex; padding: 3px; gap: 3px; background: #edf3ee; border-radius: 10px }
+.tabs { display: flex; padding: 3px; gap: 3px; background: #edf3ee; border-radius: 10px; overflow-x: auto; max-width: 100% }
 .tabs button { color: var(--muted); background: transparent; font-size: 14px; font-weight: 700; border: 0; border-radius: 7px; min-width: 88px; min-height: 35px; padding: 6px 15px }
 .tabs button:hover { color: var(--ink) }
 .tabs button[aria-selected="true"] { color: #fff; background: var(--accent) }
@@ -156,3 +156,9 @@ tr.selected td { background: var(--accent-soft) }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto }
 }
+
+.pose-selectors { display: flex; flex-wrap: wrap; gap: 8px }
+.tabs button.is-empty { opacity: .55 }
+.quality-table td { vertical-align: top; white-space: nowrap }
+.quality-table .quality-current, .quality-ssim { display: block }
+.quality-ssim { margin-top: 4px; color: var(--ink); font-size: 13px }

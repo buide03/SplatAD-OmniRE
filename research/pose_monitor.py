@@ -8,6 +8,7 @@ from PIL import Image
 from torch import nn
 from torch.nn import functional as F
 
+from .geometry import matrix_quat
 from .evaluate import camera_indices, camera_sample, crop_bounds, overlay, project, reprojection, to_image
 from .prepare import dump_json, front_pose_summary, read_json
 
@@ -61,6 +62,24 @@ def select_observations(manifest, model, cameras):
     ))[:2]
 
 
+def track_observations(manifest, people, cameras, taken=()):
+    """One clearly visible observation per SMPL pedestrian, so every mesh is followed during training."""
+    best = {}
+    for row in manifest["observations"]:
+        if (not row["usable"] or not row["smpl_valid"] or row["uuid"] not in people or row["uuid"] in taken
+                or (row["camera"], row["frame"]) not in cameras):
+            continue
+        rank = (row.get("limbs_visible") is not False, row["bbox_height_px"], -row["frame"], row["camera"])
+        if row["uuid"] not in best or rank > best[row["uuid"]][0]:
+            best[row["uuid"]] = (rank, row)
+    return [best[uuid][1] for uuid in sorted(best)]
+
+
+def pose_drift(current, initial):
+    """Displacement of every stored pose from its initialization: root translation, root and joint rotations."""
+    return {name: drift(current[name].detach(), initial[name].detach(), name != "translation") for name in current}
+
+
 def polygon_mask(shape, polygon):
     import cv2
 
@@ -87,13 +106,14 @@ def iou(prediction, reference):
 
 
 @torch.no_grad()
-def measure_rgb(model, camera, image, person, row, include_initial=True):
-    """Use the same native-resolution reference pixels and projection for each snapshot."""
+def compare_meshes(gt, prediction, row, initial, current, faces, include_initial=True):
+    """Overlay the initial and current SMPL mesh on the original RGB and score the person region.
+
+    ``gt`` and ``prediction`` are HxWx3 images in [0, 1]. ``initial`` and ``current`` are
+    ``(projection, visible)`` pairs, where a projection is ``(xy, in_front)`` from ``evaluate.project``.
+    """
     import cv2
 
-    outputs = model.get_camera_outputs(camera)
-    prediction = outputs["rgb"]
-    gt = model.composite_with_background(model.get_gt_img(image), outputs["background"])
     if gt.shape != prediction.shape:
         raise ValueError(f"Monitor RGB shapes differ: {gt.shape} and {prediction.shape}")
     height, width = gt.shape[:2]
@@ -101,14 +121,7 @@ def measure_rgb(model, camera, image, person, row, include_initial=True):
     roi = np.s_[y1:y2, x1:x2]
     gt_rgb = to_image(gt)
     diff = (prediction - gt).abs()
-
-    params = (outputs["world_to_camera"], camera.get_intrinsics_matrices()[0])
-    capture_time = outputs["capture_time"]
-    initial, initial_visible = person.mesh_at(capture_time, initial=True)
-    current, current_visible = person.mesh_at(capture_time)
-    xy_initial = project(initial, *params)
-    xy_current = project(current, *params)
-    visible = bool(current_visible)
+    (xy_initial, initial_visible), (xy_current, visible) = initial, current
     ref = row.get("silhouette_xy")
     metrics = {"mesh_visible": visible, "silhouette_iou": None, "silhouette_initial_iou": None}
     reference_image = gt_rgb.copy()
@@ -118,11 +131,9 @@ def measure_rgb(model, camera, image, person, row, include_initial=True):
             metrics.update(roi_source="manual_silhouette", roi_pixels=int(reference.sum()),
                            rgb_mae=finite_number(float(diff[torch.as_tensor(reference, device=diff.device)].mean())))
             if visible:
-                metrics["silhouette_iou"] = iou(mesh_silhouette(reference.shape, xy_current, person.faces), reference)
-            if include_initial and bool(initial_visible):
-                metrics["silhouette_initial_iou"] = iou(
-                    mesh_silhouette(reference.shape, xy_initial, person.faces), reference
-                )
+                metrics["silhouette_iou"] = iou(mesh_silhouette(reference.shape, xy_current, faces), reference)
+            if include_initial and initial_visible:
+                metrics["silhouette_initial_iou"] = iou(mesh_silhouette(reference.shape, xy_initial, faces), reference)
             cv2.polylines(reference_image, [np.rint(ref).astype(np.int32)], True, (70, 213, 255), 2, cv2.LINE_AA)
     if "rgb_mae" not in metrics:
         bx1, by1, bx2, by2 = crop_bounds(row["bbox_xyxy"], height, width, minimum=1)
@@ -132,19 +143,36 @@ def measure_rgb(model, camera, image, person, row, include_initial=True):
     for point in labels.values():
         cv2.circle(reference_image, tuple(int(round(value)) for value in point["xy"]), 3,
                    (70, 213, 255), 1, cv2.LINE_AA)
-    point_errors = reprojection(labels, (None, None, xy_initial, xy_current, bool(initial_visible & current_visible)))
+    point_errors = reprojection(labels, (None, None, xy_initial, xy_current, initial_visible and visible))
     if point_errors["keypoint_count"] != len(labels):
         point_errors.update(reprojection_mae_px=None, reprojection_initial_mae_px=None)
     metrics.update(point_errors)
     panels = {
         "reference": reference_image[roi].copy(),
-        "current": overlay(reference_image, xy_current, visible, person.faces, (100, 246, 181))[roi].copy(),
+        "current": overlay(reference_image, xy_current, visible, faces, (100, 246, 181))[roi].copy(),
         "render": to_image(prediction)[roi].copy(),
         "error": to_image(diff * 3)[roi].copy(),
     }
     if include_initial:
-        panels["initial"] = overlay(reference_image, xy_initial, bool(initial_visible), person.faces,
-                                    (252, 192, 89))[roi].copy()
+        panels["initial"] = overlay(reference_image, xy_initial, initial_visible, faces, (252, 192, 89))[roi].copy()
+    return metrics, panels
+
+
+@torch.no_grad()
+def measure_rgb(model, camera, image, person, row, include_initial=True):
+    """Use the same native-resolution reference pixels and projection for each snapshot."""
+    outputs = model.get_camera_outputs(camera)
+    prediction = outputs["rgb"]
+    gt = model.composite_with_background(model.get_gt_img(image), outputs["background"])
+    params = (outputs["world_to_camera"], camera.get_intrinsics_matrices()[0])
+    capture_time = outputs["capture_time"]
+    initial, initial_visible = person.mesh_at(capture_time, initial=True)
+    current, current_visible = person.mesh_at(capture_time)
+    visible = bool(current_visible)
+    metrics, panels = compare_meshes(gt, prediction, row, (project(initial, *params), bool(initial_visible)),
+                                     (project(current, *params), visible), person.faces, include_initial)
+    if visible and hasattr(person, "constraints"):
+        metrics.update(person.constraints.measure(person, capture_time))
     return metrics, panels
 
 
@@ -229,9 +257,11 @@ class PoseMonitor:
                        "pose_summary": front_pose_summary(manifest)}
         cameras = camera_indices(self.manager)
         rows = select_observations(manifest, self.model, cameras)
+        tracked = track_observations(manifest, self.model.person_index, cameras, {row["uuid"] for row in rows})
         self.observations = {
-            f"{row['camera']}/{row['frame']}/{row['uuid']}": {**row, "image_index": cameras[row["camera"], row["frame"]]}
-            for row in rows
+            f"{row['camera']}/{row['frame']}/{row['uuid']}": {
+                **row, "image_index": cameras[row["camera"], row["frame"]], "probe_update": i < len(rows)}
+            for i, row in enumerate([*rows, *tracked])
         }
         self.watched_uuids = {row["uuid"] for row in rows}
         self.watched_indices = {row["image_index"] for row in self.observations.values()}
@@ -297,11 +327,11 @@ class PoseMonitor:
 
                 self.model.eval()
                 values, images = measure()
-                if learning_rates:
+                if learning_rates and row.get("probe_update", True):
                     update, updated_images = pose_only_rgb_step(self.model, person, fetch_batch, learning_rates,
                                                                 lambda: measure(include_initial=False))
                 else:
-                    update, updated_images = {"status": "frozen"}, {}
+                    update, updated_images = {"status": "tracked" if learning_rates else "frozen"}, {}
                 if "current" in updated_images:
                     images["after_probe"] = updated_images["current"]
                     images["render_after_probe"] = updated_images["render"]
@@ -320,6 +350,16 @@ class PoseMonitor:
                       f"RGB pose probe={update['status']} IoU after={probe_iou}", flush=True)
         finally:
             self.model.train(was_training)
+        tracks = {}
+        with torch.no_grad():
+            for node in self.model.people:
+                current = {name: getattr(node, name) for name in POSE_ATTRS}
+                tracks[node.uuid] = pose_drift(current, {name: getattr(node, f"initial_{name}") for name in POSE_ATTRS})
+                if getattr(node, "box_at", None) is not None:
+                    # How far the learned cuboid carrying this person moved from its annotation.
+                    rotation, position = node.box_at(node.times)
+                    tracks[node.uuid]["box_translation"] = drift(position, node.anchor_position, False)
+                    tracks[node.uuid]["box_rotation"] = drift(matrix_quat(rotation), matrix_quat(node.anchor_rotation), True)
         self.steps = [record for record in self.steps if record["step"] < step]
-        self.steps.append({"step": step, "results": results})
+        self.steps.append({"step": step, "results": results, "tracks": tracks})
         self.publish()

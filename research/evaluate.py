@@ -265,8 +265,7 @@ def evaluate(pipeline, manifest, output, probes=False, write_panels=True):
                         Image.fromarray(data[roi]).save(output / path)
                         panels[label] = path.as_posix()
                 crops.append({**row, **values, **scan_results[row["scan"], row["uuid"]],
-                              "comparison_eligible": row["uuid"] in selected and (
-                                  model.config.variant == "R0" or row["uuid"] in model.person_index),
+                              "comparison_eligible": row["uuid"] in selected and row["uuid"] in model.person_index,
                               "crop_xyxy": [x1, y1, x2, y2], "rgb_bbox_xyxy": rgb_box, "panels": panels})
         contacts = foot_contacts(model, manifest.get("foot_contacts", []), cameras, manager, -0.01)
         result = {"scene": manifest["scene_id"], "observations": crops, "scene_metrics": scene_metrics,
@@ -295,10 +294,12 @@ def run_record(config, checkpoint, step, manifest_path, manifest, mode):
     stats_path = base / "run_stats.json"
     stats = read_json(stats_path) if stats_path.exists() else {}
     return {
-        "scene": config.pipeline.model.scene_id, "variant": config.pipeline.model.variant,
+        # The native SplatAD config has no research fields; its scene is the dataparser sequence.
+        "scene": getattr(config.pipeline.model, "scene_id", None) or config.pipeline.datamanager.dataparser.sequence,
+        "variant": getattr(config.pipeline.model, "variant", "SplatAD"),
         "run_id": config.timestamp, "step": step, "mode": mode, "checkpoint": checkpoint.name,
         "manifest_sha256": sha256(manifest_path), "metrics": "metrics.json",
-        "pose_summary": front_pose_summary(manifest) if config.pipeline.model.variant != "R0" else None,
+        "pose_summary": front_pose_summary(manifest),
         "training": "training.jsonl" if (base / "training.jsonl").exists() else None,
         "run_stats": stats if stats.get("step") == step else {},
         "environment": read_json(base / "environment.json") if (base / "environment.json").exists() else {},

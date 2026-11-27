@@ -60,54 +60,68 @@ def freeze_examples(raw_scene, cameras, frames_per_camera, manifest=None):
     return {"schema": 2, "scene_id": raw_scene.name, "cameras": list(cameras), "images": images}
 
 
+def score_images(examples, render, ssim):
+    """Score every frozen sample with one SSIM object and the shared crop rules.
+
+    ``render(sample)`` returns the predicted and target RGB images as HxWx3 tensors in [0, 1].
+    """
+    from .evaluate import PERSON_MIN_CROP, crop_bounds, psnr_ssim, rgb_batch
+
+    totals = {scope: dict(samples=0, psnr_db=0.0, ssim=0.0, l1=0.0) for scope in SCOPES}
+
+    def add(scope, pred, target):
+        # L1 is the photometric term of the training loss, so it reads as "render loss" per object.
+        scores = {**psnr_ssim(pred, target, ssim), "l1": (pred - target).abs().mean()}
+        totals[scope]["samples"] += 1
+        for metric, value in scores.items():
+            totals[scope][metric] += value
+
+    for sample in examples["images"]:
+        pred, target = render(sample)
+        if pred.shape != target.shape or pred.shape[:2] != (sample["height"], sample["width"]):
+            raise ValueError(f"RGB quality image size changed for {sample['camera']}/{sample['frame']}")
+        a, b = rgb_batch(pred), rgb_batch(target)
+        if not sample.get("person_only"):
+            add("scene", a, b)
+        for crop in sample["crops"]:
+            minimum = PERSON_MIN_CROP if examples.get("schema", 1) == 2 and crop["scope"] == "person" else 64
+            x1, y1, x2, y2 = crop_bounds(crop["bbox"], sample["height"], sample["width"], minimum)
+            patch = np.s_[:, :, y1:y2, x1:x2]
+            add(crop["scope"], a[patch].contiguous(), b[patch].contiguous())
+    result = {}
+    for scope, total in totals.items():
+        count = total["samples"]
+        scores = {metric: float(total[metric] / count) if count else None for metric in ("psnr_db", "ssim", "l1")}
+        if any(value is not None and not math.isfinite(value) for value in scores.values()):
+            raise ValueError(f"Nonfinite RGB quality score for {scope}")
+        result[scope] = {"samples": count, **scores}
+    return result
+
+
 def measure_quality(pipeline, examples):
     import torch
 
-    from .evaluate import PERSON_MIN_CROP, camera_indices, camera_sample, crop_bounds, psnr_ssim, rgb_batch
+    from .evaluate import camera_indices, camera_sample
 
     model = pipeline.model
     manager = pipeline.datamanager
     indices = camera_indices(manager)
-    totals = {scope: dict(samples=0, psnr_db=0.0, ssim=0.0) for scope in SCOPES}
 
-    def add(scope, pred, target):
-        scores = psnr_ssim(pred, target, model.ssim)
-        totals[scope]["samples"] += 1
-        for metric, value in scores.items():
-            totals[scope][metric] += value
+    def render(sample):
+        camera, image = camera_sample(manager, indices[sample["camera"], sample["frame"]])
+        outputs = model.get_camera_outputs(camera)
+        return outputs["rgb"], model.composite_with_background(model.get_gt_img(image), outputs["background"])
 
     saved = {key: getattr(model, key) for key in ("info", "last_size") if hasattr(model, key)}
     was_training = pipeline.training
     pipeline.eval()
     try:
         with torch.no_grad():
-            for sample in examples["images"]:
-                camera, image = camera_sample(manager, indices[sample["camera"], sample["frame"]])
-                outputs = model.get_camera_outputs(camera)
-                target = model.composite_with_background(model.get_gt_img(image), outputs["background"])
-                pred = outputs["rgb"]
-                if pred.shape != target.shape or pred.shape[:2] != (sample["height"], sample["width"]):
-                    raise ValueError(f"RGB quality image size changed for {sample['camera']}/{sample['frame']}")
-                a, b = rgb_batch(pred), rgb_batch(target)
-                if not sample.get("person_only"):
-                    add("scene", a, b)
-                for crop in sample["crops"]:
-                    minimum = PERSON_MIN_CROP if examples.get("schema", 1) == 2 and crop["scope"] == "person" else 64
-                    x1, y1, x2, y2 = crop_bounds(crop["bbox"], sample["height"], sample["width"], minimum)
-                    patch = np.s_[:, :, y1:y2, x1:x2]
-                    add(crop["scope"], a[patch].contiguous(), b[patch].contiguous())
+            return score_images(examples, render, model.ssim)
     finally:
         pipeline.train(was_training)
         for key, value in saved.items():
             setattr(model, key, value)
-    result = {}
-    for scope, total in totals.items():
-        count = total["samples"]
-        scores = {metric: float(total[metric] / count) if count else None for metric in ("psnr_db", "ssim")}
-        if any(value is not None and not math.isfinite(value) for value in scores.values()):
-            raise ValueError(f"Nonfinite RGB quality score for {scope}")
-        result[scope] = {"samples": count, **scores}
-    return result
 
 
 class QualityHistory:
@@ -140,7 +154,9 @@ class QualityHistory:
     def capture(self, pipeline, step):
         if self.steps and self.steps[-1]["step"] == step:
             return
-        summary = measure_quality(pipeline, self.examples)
+        self.add_step(step, measure_quality(pipeline, self.examples))
+
+    def add_step(self, step, summary):
         self.steps.append({"step": step, "scopes": summary})
         self.publish()
         print(f"RGB quality at {step} optimizer updates: {summary}", flush=True)

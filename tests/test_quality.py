@@ -47,7 +47,7 @@ def test_quality_measures_full_image_and_separate_vehicle_and_person_crops(monke
     stats = quality.measure_quality(pipeline, examples)
     assert stats["scene"]["psnr_db"] == pytest.approx(9.0309)
     assert stats["vehicle"]["psnr_db"] == pytest.approx(6.0206)
-    assert stats["person"] == {"samples": 1, "psnr_db": 120.0, "ssim": 1.0}
+    assert stats["person"] == {"samples": 1, "psnr_db": 120.0, "ssim": 1.0, "l1": 0.0}
     assert stats["vehicle"]["ssim"] == 0.5
     assert ssim_shapes == [(1, 3, 64, 128), (1, 3, 64, 64), (1, 3, 64, 64)]
     assert pipeline.training and model.info == {"training": True} and model.last_size == (16, 32)
@@ -97,4 +97,4 @@ def test_reviewed_pedestrian_frames_preserve_global_sampling_and_use_tight_crops
     monkeypatch.setattr(evaluate, "camera_sample", lambda manager, index: (None, target))
     metrics = quality.measure_quality(pipeline, examples)
     assert metrics["scene"]["samples"] == 2 and metrics["vehicle"]["samples"] == 0
-    assert metrics["person"] == {"samples": 1, "psnr_db": 0.0, "ssim": 0.5}
+    assert metrics["person"] == {"samples": 1, "psnr_db": 0.0, "ssim": 0.5, "l1": 1.0}

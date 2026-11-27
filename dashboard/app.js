@@ -5,6 +5,7 @@ const selectRender = byId("run");
 const tabs = [...document.querySelectorAll("[role=tab]")];
 const state = {runs: [], scene: "", mode: "source", camera: "", renderPaths: new Map(), playback: null};
 const cameraLabels = {front_left: "Trước trái", front: "Trước", front_right: "Trước phải"};
+const renderModels = ["SplatAD", "R2", "R3", "OmniRe"];
 const videoPanel = byId("video-panel");
 const fullscreen = byId("fullscreen");
 let sceneMedia = {};
@@ -142,7 +143,7 @@ function showVideo(run, position) {
   if (video?.poster) player.poster = artifact(video.poster, run);
   else player.removeAttribute("poster");
   playbackAvailability(video, !state.scene ? "Chưa có cảnh." :
-    state.mode === "source" ? "Chưa có video gốc." : "Chưa có video render.");
+    state.mode === "source" ? "Chưa có video gốc." : `Chưa có video render của ${state.mode}.`);
   const screen = byId("video-screen");
   const rate = byId("video-fps");
   rate.hidden = !Number.isFinite(video?.fps);
@@ -162,29 +163,44 @@ function renderLabel(run, choices) {
   return [label, ...detail.filter(Boolean)].join(" · ");
 }
 
+function finalRender(list) {
+  // The API sorts runs by step, so the last match is the final checkpoint.
+  return list.findLast(run => run.mode === "checkpoint" && run.front_triptych && run.interpolation === "smooth")
+    ?? list.findLast(run => run.mode === "checkpoint" && run.front_triptych)
+    ?? list.findLast(run => run.mode === "checkpoint") ?? list.at(-1);
+}
+
 function drawScene(position) {
   const runs = state.runs.filter(run => String(run.scene) === state.scene);
   const sources = runs.filter(run => run.mode === "source");
   const source = sources.findLast(run => run.front_triptych) ?? sources.findLast(run => chooseVideo(run));
   const renders = runs.filter(run => ["checkpoint", "zero_smpl_velocity"].includes(run.mode) && chooseVideo(run));
-  const latest = renders.findLast(run => run.mode === "checkpoint" && run.variant === "R2" && run.front_triptych)
-    ?? renders.findLast(run => run.front_triptych) ?? renders.at(-1);
-  const render = renders.find(run => run.path === state.renderPaths.get(state.scene))
-    ?? renders.findLast(run => run.step === latest?.step && run.variant === latest.variant && run.mode === latest.mode
-      && run.front_triptych && run.interpolation === "smooth")
-    ?? latest;
-  options(selectRender, renders.map(run => [run.path, renderLabel(run, renders)]), render?.path, "Chưa có bản render");
-  selectRender.hidden = state.mode !== "render" || renders.length < 2;
+  const views = {source};
+  const lists = {};
+  for (const name of renderModels) {
+    lists[name] = renders.filter(run => run.variant === name);
+    views[name] = lists[name].find(run => run.path === state.renderPaths.get(`${state.scene}/${name}`))
+      ?? finalRender(lists[name]);
+  }
+  const choices = state.mode === "source" ? [] : lists[state.mode] ?? [];
+  options(selectRender, choices.map(run => [run.path, renderLabel(run, choices)]), views[state.mode]?.path,
+    "Chưa có bản render");
+  selectRender.hidden = choices.length < 2;
   byId("scene-title").textContent = state.scene ? `Cảnh ${state.scene}` : "PandaSet";
   for (const tab of tabs) {
     const active = tab.dataset.mode === state.mode;
+    const available = Boolean(views[tab.dataset.mode]);
     tab.setAttribute("aria-selected", String(active));
     tab.tabIndex = active ? 0 : -1;
+    tab.classList.toggle("is-empty", !available);
+    tab.title = available ? "" : "Chưa có video";
     if (active) videoPanel.setAttribute("aria-labelledby", tab.id);
   }
-  sceneMedia = {source, render, monitors: runs.filter(run => run.mode === "pose_monitor"),
+  const render = state.mode === "source" ? ["R3", "R2", "OmniRe", "SplatAD"].map(name => views[name]).find(Boolean)
+    : views[state.mode];
+  sceneMedia = {source, render, views, monitors: runs.filter(run => run.mode === "pose_monitor"),
     quality: runs.filter(run => run.mode === "rgb_quality")};
-  showVideo(sceneMedia[state.mode], position);
+  showVideo(views[state.mode], position);
   window.dispatchEvent(new CustomEvent("splatad:scene", {detail: sceneMedia}));
 }
 
@@ -200,9 +216,9 @@ function observationLocation(run, reference) {
 }
 
 window.addEventListener("splatad:jump", ({detail: reference}) => {
-  const alternate = state.mode === "source" ? "render" : "source";
-  for (const mode of [state.mode, alternate]) {
-    const location = observationLocation(sceneMedia[mode], reference);
+  const alternate = state.mode === "source" ? sceneMedia.render?.variant : "source";
+  for (const mode of [state.mode, alternate].filter(Boolean)) {
+    const location = observationLocation(sceneMedia.views?.[mode], reference);
     if (!location) continue;
     state.mode = mode;
     state.camera = location.camera;
@@ -236,7 +252,7 @@ selectScene.addEventListener("change", () => {
   drawScene();
 });
 selectRender.addEventListener("change", () => {
-  state.renderPaths.set(state.scene, selectRender.value);
+  state.renderPaths.set(`${state.scene}/${state.mode}`, selectRender.value);
   drawScene();
 });
 
@@ -289,7 +305,10 @@ async function refreshCatalog() {
     const firstSource = runs.find(run => run.mode === "source" && chooseVideo(run));
     options(selectScene, ids.map(id => [id, id]), state.scene || String(firstSource?.scene ?? ""), "Chưa có cảnh");
     state.scene = selectScene.value;
-    if (initial && runs.length && !firstSource) state.mode = "render";
+    if (initial && runs.length && !firstSource) {
+      state.mode = ["R3", "R2", "OmniRe", "SplatAD"].find(name =>
+        runs.some(run => run.variant === name && run.mode === "checkpoint" && chooseVideo(run))) ?? "source";
+    }
     drawScene();
   } catch {
     if (catalogKey === undefined) playbackAvailability(false, "Chưa kết nối được dashboard.");

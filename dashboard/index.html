@@ -28,7 +28,10 @@
         <div class="video-toolbar">
           <div role="tablist" aria-label="Video toàn cảnh" class="tabs">
             <button id="source-tab" type="button" role="tab" aria-selected="true" aria-controls="video-panel" data-mode="source">Gốc</button>
-            <button id="render-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="render" tabindex="-1">Render</button>
+            <button id="splatad-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="SplatAD" tabindex="-1">SplatAD</button>
+            <button id="r2-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="R2" tabindex="-1">R2</button>
+            <button id="r3-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="R3" tabindex="-1">R3</button>
+            <button id="omnire-tab" type="button" role="tab" aria-selected="false" aria-controls="video-panel" data-mode="OmniRe" tabindex="-1">OmniRe</button>
           </div>
           <div class="video-options">
             <select id="run" aria-label="Chọn bản render" hidden></select>
@@ -71,11 +74,9 @@
       <p id="quality-status" class="empty-note" role="status">Đang tải số liệu RGB…</p>
       <div class="quality-results" id="quality-results" hidden>
         <p id="quality-detail" class="subtle"></p>
-        <div class="quality-table" role="region" aria-label="Đối chiếu PSNR và SSIM" tabindex="0">
+        <div class="quality-table" role="region" aria-label="PSNR và SSIM của SplatAD, R2, R3 và OmniRe" tabindex="0">
           <table id="quality-values">
-            <thead><tr><th>Phạm vi</th><th>Chỉ số</th><th>Hiện tại</th>
-              <th title="Cùng số lần cập nhật">SplatAD gốc</th>
-              <th title="Trước lần cập nhật đầu tiên">Checkpoint đầu</th></tr></thead>
+            <thead><tr id="quality-head"><th>Đối tượng</th></tr></thead>
           </table>
         </div>
       </div>
@@ -84,7 +85,10 @@
     <section id="pose-monitor" class="pose-section" aria-labelledby="pose-title">
       <div class="section-head">
         <h2 id="pose-title">Pose SMPL</h2>
-        <select id="pose-observation" aria-label="Chọn quan sát pose" hidden></select>
+        <div class="pose-selectors">
+          <select id="pose-model" aria-label="Chọn mô hình" hidden></select>
+          <select id="pose-observation" aria-label="Chọn quan sát pose" hidden></select>
+        </div>
       </div>
       <dl id="pose-extraction" class="metric-list" aria-label="Trích xuất pose từ ba camera trước" hidden></dl>
       <p id="pose-status" class="empty-note" role="status">Đang tải dữ liệu pose…</p>
@@ -110,6 +114,16 @@
                 <table>
                   <thead><tr><th>Bước</th><th>RGB MAE</th><th>IoU mesh</th><th>Lỗi điểm chiếu</th></tr></thead>
                   <tbody id="pose-history"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="diagnostic">
+              <h4>Vị trí pose so với khởi tạo</h4>
+              <p class="subtle">Trung bình / lớn nhất trên mọi frame có pose của người này. Với R3, gốc và khớp đo trong hệ hộp; hai cột hộp đo hộp đã học so với nhãn PandaSet.</p>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>Bước</th><th>Tịnh tiến gốc</th><th>Xoay gốc</th><th>Xoay khớp</th><th>Dịch hộp</th><th>Xoay hộp</th></tr></thead>
+                  <tbody id="pose-drift"></tbody>
                 </table>
               </div>
             </div>

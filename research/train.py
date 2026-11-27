@@ -1,4 +1,4 @@
-"""Train the fixed-Gaussian R0/R1/R2 research preset on one Colab GPU."""
+"""Train the SplatAD baseline and the R2/R3 pedestrian variants on one Colab GPU."""
 import argparse
 import copy
 import json
@@ -16,12 +16,14 @@ import yaml
 from nerfstudio.configs.method_configs import method_configs
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackLocation
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
+from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.trainer import Trainer, TrainerConfig
 from nerfstudio.models.splatad import SplatADModelConfig
 from nerfstudio.scripts.train import main as launch
 
 from .colab import complete_checkpoint
-from .model import POSE_GROUPS, PedestrianModelConfig
+from .deformable import GAUSSIAN_PARAMETERS
+from .model import POSE_GROUPS, VARIANTS, PedestrianModelConfig
 from .pose_monitor import POSE_ATTRS, PoseMonitor, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
 from .quality import QualityHistory
@@ -42,6 +44,8 @@ class ResearchConfig(TrainerConfig):
     quality_set: Path | None = None
     quality_dir: Path | None = None
     quality_interval: int = 250
+    keep_checkpoints: int = 3
+    """Complete step checkpoints kept on disk; older ones are deleted after each save."""
 
     def save_config(self):
         path = self.get_base_dir() / "config.yml"
@@ -69,8 +73,13 @@ class ResearchTrainer(Trainer):
 
     def setup(self, *args, **kwargs):
         super().setup(*args, **kwargs)
-        log = self.base_dir / "training.jsonl"
-        if log.exists():
+        # The run folder keeps the full log; the dashboard folder gets a copy it can read live.
+        self.logs = [self.base_dir / "training.jsonl"]
+        if self.config.quality_dir:
+            self.logs.append(Path(self.config.quality_dir) / "training.jsonl")
+        for log in self.logs:
+            if not log.exists():
+                continue
             preserved = []
             for line in log.read_text(encoding="utf-8").splitlines(keepends=True):
                 try:
@@ -127,9 +136,28 @@ class ResearchTrainer(Trainer):
             TrainingCallback([TrainingCallbackLocation.AFTER_TRAIN], self.final_monitor),
         ])
 
+    def log_row(self, row):
+        for log in self.logs:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            append_jsonl(log, row)
+
+    def save_checkpoint(self, step):
+        super().save_checkpoint(step)
+        if self.config.keep_checkpoints > 0:
+            folder = self.checkpoint_dir
+            complete = sorted((path for path in folder.glob("step-*.ckpt") if complete_checkpoint(path)),
+                              key=lambda path: int(path.stem.split("-")[-1]))
+            for path in complete[:-self.config.keep_checkpoints]:
+                path.unlink(missing_ok=True)
+
     def train_iteration(self, step):
         if self.native_baseline:
-            return super().train_iteration(step)
+            loss, losses, metrics = super().train_iteration(step)
+            if step % self.config.gradient_interval == 0:
+                self.log_row({"step": step, "sensor": "rgb" if "main_loss" in losses else "lidar",
+                              "scene_loss": finite_number(float(loss.detach())),
+                              "loss_terms": {k: finite_number(float(v.detach())) for k, v in losses.items()}})
+            return loss, losses, metrics
         model = self.pipeline.model
         sample = min(self.last_logged.get(sensor, -self.config.gradient_interval)
                      for sensor in ("rgb", "lidar")) <= step - self.config.gradient_interval
@@ -153,6 +181,14 @@ class ResearchTrainer(Trainer):
             row["gradients"]["smpl_gaussians"] = gradient_stats(
                 [p for tag, group in groups.items() if tag.startswith("smpl_") and tag not in POSE_GROUPS for p in group]
             )
+            for tag in ("deformable_network", "deformable_embedding"):
+                if tag in groups:
+                    row["gradients"][tag] = gradient_stats(groups[tag])
+            row["gradients"]["deformable_gaussians"] = gradient_stats(
+                [p for tag, group in groups.items() if tag.startswith("deformable_")
+                 and tag not in ("deformable_network", "deformable_embedding") for p in group])
+            row["gradients"]["trajectory"] = gradient_stats(groups.get("trajectory_opt", []))
+            row["gradients"]["background_means"] = gradient_stats(groups.get("means", []))
             row["pose"] = {}
             with torch.no_grad():
                 for node in model.people:
@@ -174,7 +210,7 @@ class ResearchTrainer(Trainer):
                         }
                         for name in previous
                     }
-            append_jsonl(self.base_dir / "training.jsonl", row)
+            self.log_row(row)
             if fixed_rgb:
                 self.pose_monitor.observe_training_step(row)
         return loss, losses, metrics
@@ -220,7 +256,7 @@ class ResearchTrainer(Trainer):
             return
         start = perf_counter()
         rates = []
-        if self.pipeline.model.config.variant == "R2":
+        if self.pipeline.model.config.variant in VARIANTS:
             rates = [self.optimizers.optimizers[name].param_groups[0]["lr"] for name in POSE_GROUPS]
         self.pose_monitor.capture(step, rates)
         self.monitor_seconds += perf_counter() - start
@@ -307,7 +343,15 @@ def make_config(args):
             body_path=args.body.resolve() if args.body else None,
             manifest_path=manifest, manifest_digest=sha256(manifest) if manifest else "",
         )
-        config.pipeline.model.actor_flip_probability = 0.0
+        if args.variant == "R2":
+            config.pipeline.model.actor_flip_probability = 0.0
+        else:
+            # R3 keeps SplatAD's MCMC bank and actor flipping; only pedestrians leave the bank.
+            config.pipeline.model.deform_start = args.deform_start
+            config.pipeline.model.smpl_follow_box = args.smpl_follow_box
+            if args.ground:
+                config.pipeline.model.ground_path = args.ground.resolve()
+                config.pipeline.model.ground_digest = sha256(args.ground)
     config.pipeline.calc_fid_steps = ()
     datamanager = config.pipeline.datamanager
     datamanager.cache_images = datamanager.cache_lidars = "cpu"
@@ -317,12 +361,20 @@ def make_config(args):
     if args.variant != "SplatAD":
         datamanager.dataparser.include_deformable_actors = True
     datamanager.dataparser.train_split_fraction = 1.0
-    if args.variant in ("R1", "R2"):
-        for name in ("means", "quats", "scales", "opacities", "features_dc", "features_rest"):
+    if args.variant in VARIANTS:
+        for name in GAUSSIAN_PARAMETERS:
             config.optimizers[f"smpl_{name}"] = copy.deepcopy(config.optimizers[name])
-    if args.variant == "R2":
         for name, lr in zip(POSE_GROUPS, (3e-4, 2e-4, 2e-4), strict=True):
             config.optimizers[name] = {"optimizer": AdamOptimizerConfig(lr=lr), "scheduler": None}
+    if args.variant == "R3":
+        for name in GAUSSIAN_PARAMETERS:
+            config.optimizers[f"deformable_{name}"] = copy.deepcopy(config.optimizers[name])
+        # DriveStudio configs/omnire.yaml: DeformableNodes embedding and deform_network.
+        for name, lr in (("deformable_embedding", 1e-3), ("deformable_network", 1.6e-3)):
+            config.optimizers[name] = {
+                "optimizer": AdamOptimizerConfig(lr=lr, eps=1e-15),
+                "scheduler": ExponentialDecaySchedulerConfig(lr_final=lr / 10, max_steps=args.schedule_steps),
+            }
     return config
 
 
@@ -330,10 +382,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", type=Path)
     parser.add_argument("--scene", default="011")
-    parser.add_argument("--variant", choices=("SplatAD", "R0", "R1", "R2"), default="R2")
+    parser.add_argument("--variant", choices=("SplatAD", *VARIANTS), default="R2")
     parser.add_argument("--tracks", type=Path)
     parser.add_argument("--body", type=Path)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--ground", type=Path, help="R3 local road planes written by research.ground")
+    parser.add_argument("--smpl-follow-box", action=argparse.BooleanOptionalAction, default=True,
+                        help="R3: express SMPL roots in their learned cuboid (use --no-smpl-follow-box to ablate)")
+    parser.add_argument("--deform-start", type=int, default=3000,
+                        help="R3 steps before OmniRe deformation of moving non-SMPL pedestrians")
     parser.add_argument("--output", type=Path, default=Path("runs"))
     parser.add_argument("--run-id", default="{timestamp}")
     parser.add_argument("--steps", type=int, default=200, help="Number of iterations to execute in this session")
@@ -364,6 +421,10 @@ def main():
         parser.error("The pose monitor interval must be nonnegative")
     if args.quality_every is not None and args.quality_every < 0:
         parser.error("The RGB quality interval must be nonnegative")
+    if args.deform_start < 0:
+        parser.error("--deform-start must be nonnegative")
+    if args.ground and (args.resume or args.variant != "R3"):
+        parser.error("--ground applies to a new R3 run. Resume reuses the saved configuration.")
     if args.resume:
         if not args.checkpoint:
             parser.error("--resume requires --checkpoint")
@@ -388,8 +449,8 @@ def main():
         if args.quality_every is not None:
             config.quality_interval = args.quality_every
     else:
-        if args.raw is None or (args.variant in ("R1", "R2") and not all((args.tracks, args.body, args.manifest))):
-            parser.error("Supply --raw and, for R1/R2, --tracks, --body and --manifest")
+        if args.raw is None or (args.variant in VARIANTS and not all((args.tracks, args.body, args.manifest))):
+            parser.error("Supply --raw and, for R2/R3, --tracks, --body and --manifest")
         config = make_config(args)
         existing = config.get_checkpoint_dir()
         if config.timestamp != "{timestamp}" and any(complete_checkpoint(path) for path in existing.glob("step-*.ckpt")):

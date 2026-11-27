@@ -39,7 +39,7 @@ def probe_sensor(config, pipeline, row, sensor):
         output = model.get_outputs(instrument)[output_key]
         result.update({"shape": list(output.shape), "render_finite": bool(torch.isfinite(output).all())})
         reference = output.detach().clone()
-    if config.pipeline.model.variant != "R2":
+    if config.pipeline.model.variant not in ("R2", "R3"):
         return result, instrument, output_key, reference
 
     model.train()
