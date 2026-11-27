@@ -98,3 +98,57 @@ def test_run_record_names_the_native_splatad_baseline(tmp_path):
         timestamp="run", get_base_dir=lambda: tmp_path)
     record = run_record(config, tmp_path / "step-000009999.ckpt", 9999, manifest, {"observations": []}, "checkpoint")
     assert (record["scene"], record["variant"], record["step"]) == ("030", "SplatAD", 9999)
+
+
+def test_omnire_log_uses_the_r2_r3_gradient_names(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from research.omnire_baseline import gradient_row, truncate_jsonl
+
+    translation = torch.nn.Parameter(torch.zeros(3, 1, 3))
+    network = torch.nn.Parameter(torch.zeros(4))
+    frozen = torch.nn.Parameter(torch.zeros(2))
+    translation.grad = torch.full_like(translation, 0.5)
+    network.grad = torch.ones_like(network)
+    trainer = SimpleNamespace(optimizer=SimpleNamespace(param_groups=[
+        {"name": "SMPLNodes#ins_translation", "params": [translation]},
+        {"name": "DeformableNodes#deform_network", "params": [network]},
+        {"name": "Background#xyz", "params": [frozen]},
+    ]))
+    row = gradient_row(trainer, 50, {"rgb_loss": torch.tensor(0.2), "smpl_temporal_smooth": torch.tensor(0.01)})
+    assert row["scene_loss"] == pytest.approx(0.21)
+    assert row["gradients"]["smpl_translation"]["norm"] == pytest.approx(1.5)
+    assert row["gradients"]["deformable_network"]["norm"] == pytest.approx(2.0)
+    assert row["gradients"]["background_means"]["state"] == "none"
+    assert row["gradients"]["smpl_body_rotation"]["state"] == "none"
+
+    log = tmp_path / "training.jsonl"
+    log.write_text("".join(json.dumps({"step": s}) + "\n" for s in (0, 25, 1000, 1025)) + "torn line")
+    truncate_jsonl(log, 1000)
+    assert [json.loads(line)["step"] for line in log.read_text().splitlines()] == [0, 25]
+
+
+def test_omnire_resume_state_round_trips_model_optimizer_and_rng(tmp_path):
+    import random
+    from types import SimpleNamespace
+
+    from research.omnire_baseline import save_resume_state
+
+    weight = torch.nn.Parameter(torch.ones(3))
+    optimizer = torch.optim.Adam([weight], lr=0.1)
+    weight.grad = torch.ones(3)
+    optimizer.step()
+    trainer = SimpleNamespace(optimizer=optimizer, state_dict=lambda only_model=True: {"models": {"w": weight.detach()}})
+    random.seed(9)
+    torch.manual_seed(9)
+    path = tmp_path / "resume.pth"
+    save_resume_state(path, trainer, 1999)
+    expected = (random.random(), torch.rand(1))
+    state = torch.load(path, weights_only=False)
+    assert state["step"] == 1999 and not path.with_suffix(".partial").exists()
+    assert torch.equal(state["model"]["models"]["w"], weight.detach())
+    assert state["optimizer"]["state"][0]["step"] == 1
+    random.setstate(state["rng"]["python"])
+    torch.set_rng_state(state["rng"]["torch"])
+    assert (random.random(), torch.rand(1)) == expected

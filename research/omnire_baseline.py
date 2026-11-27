@@ -126,26 +126,6 @@ def log_dir(output, run_id):
     return output / "omnire" / run_id
 
 
-def train(args):
-    folder = log_dir(args.output, args.run_id)
-    if (folder / "checkpoint_final.pth").is_file():
-        print(f"OmniRe already finished: {folder / 'checkpoint_final.pth'}")
-        return
-    if folder.exists():
-        # DriveStudio resumes model weights only and then stops saving, so an interrupted run starts again.
-        stale = folder.with_name(f"{folder.name}-interrupted-{time.strftime('%Y%m%d-%H%M%S')}")
-        folder.rename(stale)
-        print(f"Moved the interrupted OmniRe run to {stale}")
-    link_smpl(args.smpl)
-    run_module("tools/train.py", [
-        "--config_file", "configs/omnire.yaml", "--output_root", args.output,
-        "--project", "omnire", "--run_name", args.run_id,
-        *shared_settings(args.processed, args.scene, args.steps, args.seed, args.checkpoint_every),
-    ], path=True)
-    if not (folder / "checkpoint_final.pth").is_file():
-        raise RuntimeError(f"OmniRe did not write {folder / 'checkpoint_final.pth'}")
-
-
 def checkpoints(folder, steps):
     found = []
     for path in folder.glob("checkpoint_*.pth"):
@@ -218,102 +198,6 @@ def omnire_drift(node, initial, slot):
     return pose_drift(current, reference)
 
 
-def score(args):
-    import numpy as np
-    import torch
-    from PIL import Image
-    from pytorch_msssim import SSIM
-
-    from models.video_utils import render_images
-
-    from .evaluate import project
-    from .pose_monitor import compare_meshes, select_observations, track_observations
-    from .prepare import front_pose_summary
-    from .quality import QualityHistory, score_images
-
-    folder = log_dir(args.output, args.run_id)
-    cfg, dataset, trainer = load_trainer(folder)
-    cameras = list(cfg.data.pixel_source.cameras)
-    examples = read_json(args.quality_set)
-    ssim = SSIM(data_range=1.0, size_average=True, channel=3)
-    num_cams = dataset.pixel_source.num_cams
-    raw_scene = args.raw / args.scene
-
-    def render(sample):
-        index = sample["frame"] * num_cams + cameras.index(OMNIRE_CAMERAS.index(sample["camera"]))
-        result = render_images(trainer, dataset.full_image_set, vis_indices=[index])
-        pred = torch.from_numpy(np.asarray(result["rgbs"][0], dtype=np.float32)).cuda()
-        # SplatAD's targets: the original JPEG, back camera without its bottom 260 rows.
-        with Image.open(raw_scene / "camera" / f"{sample['camera']}_camera" / f"{sample['frame']:02d}.jpg") as image:
-            target = torch.from_numpy(np.array(image.convert("RGB"), dtype=np.float32) / 255).cuda()
-        return pred[:sample["height"]], target[:sample["height"]]
-
-    def original(camera, frame):
-        with Image.open(raw_scene / "camera" / f"{camera}_camera" / f"{frame:02d}.jpg") as image:
-            return torch.from_numpy(np.array(image.convert("RGB"), dtype=np.float32) / 255).cuda()
-
-    # The same mesh observations as the R2/R3 pose monitor: reviewed ones, then one per SMPL pedestrian.
-    manifest = read_json(args.manifest)
-    instances_info = json.loads((args.processed / args.scene / "instances" / "instances_info.json").read_text())
-    people = smpl_people(dataset, cfg, instances_info) if "SMPLNodes" in cfg.model else []
-    slots = {uuid: slot for slot, (_, uuid) in enumerate(people)}
-    views = {(name, frame): None for name in OMNIRE_CAMERAS for frame in range(dataset.num_img_timesteps)}
-    probe_rows = select_observations(manifest, type("People", (), {"person_index": slots}), views)
-    rows = [*probe_rows, *track_observations(manifest, slots, views, {row["uuid"] for row in probe_rows})]
-    observations = {f"{row['camera']}/{row['frame']}/{row['uuid']}": {**row, "probe_update": False} for row in rows}
-    monitor = {"manifest_sha256": sha256(args.manifest), "observations": observations, "steps": []}
-    initial = None
-
-    def capture_meshes(step):
-        node = trainer.models["SMPLNodes"]
-        if len(people) != node.num_instances:
-            raise ValueError(f"Expected {node.num_instances} OmniRe SMPL instances, matched {len(people)} UUIDs")
-        results = {}
-        for i, (key, row) in enumerate(observations.items()):
-            slot = slots[row["uuid"]]
-            index = row["frame"] * num_cams + cameras.index(OMNIRE_CAMERAS.index(row["camera"]))
-            _, cam_infos = dataset.full_image_set.get_image(index, 1)
-            view = torch.linalg.inv(cam_infos["camera_to_world"].float().cuda())
-            intrinsics = cam_infos["intrinsics"].float().cuda()
-            meshes = []
-            for params in (initial, None):
-                world, present, faces = posed_meshes(node, row["frame"], params)
-                meshes.append((project(world[slot], view, intrinsics), bool(present[slot])))
-            rendered = render_images(trainer, dataset.full_image_set, vis_indices=[index])["rgbs"][0]
-            prediction = torch.from_numpy(np.asarray(rendered, dtype=np.float32)).cuda()
-            values, images = compare_meshes(original(row["camera"], row["frame"]), prediction, row, *meshes, faces)
-            written = {}
-            for name, image in images.items():
-                relative = Path(f"step-{step:06d}") / f"observation-{i + 1}" / f"{name}.png"
-                (args.monitor / relative).parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(image).save(args.monitor / relative)
-                written[name] = relative.as_posix()
-            results[key] = {"metrics": values, "panels": written, "pose_only_rgb_probe": {"status": "tracked"},
-                            "actual_rgb_step": None}
-        tracks = {uuid: omnire_drift(node, initial, slot) for uuid, slot in slots.items()}
-        monitor["steps"].append({"step": step, "results": results, "tracks": tracks})
-        dump_json(args.monitor / "monitor.json", monitor)
-        dump_json(args.monitor / "run.json", {
-            "scene": args.scene, "variant": "OmniRe", "mode": "pose_monitor", "run_id": args.run_id, "videos": [],
-            "monitor": "monitor.json", "pose_summary": front_pose_summary(manifest), "step": step,
-            "snapshots": len(monitor["steps"])})
-
-    history = QualityHistory(args.quality_set, args.result, examples["scene_id"], "OmniRe", args.run_id, 0)
-    history.steps.clear()
-    for step, path in checkpoints(folder, args.steps):
-        trainer.resume_from_checkpoint(ckpt_path=str(path), load_only_model=True)
-        trainer.set_eval()
-        with torch.no_grad():
-            history.add_step(step, score_images(examples, render, ssim.cuda()))
-            if people:
-                if initial is None:
-                    device = trainer.models["SMPLNodes"].instances_trans.device
-                    initial = initial_pose(dataset.pixel_source, people, device)
-                capture_meshes(step)
-    if not history.steps:
-        raise FileNotFoundError(f"No OmniRe checkpoint in {folder}")
-
-
 def load_trainer(folder):
     import torch
     from omegaconf import OmegaConf
@@ -347,6 +231,347 @@ def camera_path(c2w, times, samples):
     poses = np.tile(np.eye(4), (len(samples), 1, 1))
     poses[:, :3, :3], poses[:, :3, 3] = rotation, position
     return poses
+
+
+GRADIENT_TAGS = {
+    # Same names as the R2/R3 training log, so the dashboard plots all models on one chart.
+    "smpl_translation": ("SMPLNodes#ins_translation",),
+    "smpl_root_rotation": ("SMPLNodes#ins_rotation",),
+    "smpl_body_rotation": ("SMPLNodes#smpl_rotation",),
+    "smpl_gaussians": tuple(f"SMPLNodes#{name}" for name in ("xyz", "sh_dc", "sh_rest", "opacity", "scaling", "rotation")),
+    "deformable_network": ("DeformableNodes#deform_network",),
+    "deformable_embedding": ("DeformableNodes#embedding",),
+    "deformable_gaussians": tuple(f"DeformableNodes#{name}" for name in
+                                  ("xyz", "sh_dc", "sh_rest", "opacity", "scaling", "rotation")),
+    "trajectory": ("RigidNodes#ins_translation", "RigidNodes#ins_rotation"),
+    "background_means": ("Background#xyz",),
+}
+
+
+def gradient_row(trainer, step, loss_dict):
+    from .pose_monitor import finite_number, gradient_stats
+
+    groups = {group["name"]: group["params"] for group in trainer.optimizer.param_groups}
+    return {
+        "step": step, "sensor": "rgb",
+        "scene_loss": finite_number(float(sum(value.detach() for value in loss_dict.values()))),
+        "loss_terms": {name: finite_number(float(value.detach())) for name, value in loss_dict.items()},
+        "gradients": {tag: gradient_stats([p for name in names for p in groups.get(name, [])])
+                      for tag, names in GRADIENT_TAGS.items()},
+    }
+
+
+def truncate_jsonl(path, start_step):
+    if not path.is_file():
+        return
+    kept = []
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        try:
+            if json.loads(line)["step"] < start_step:
+                kept.append(line)
+        except (json.JSONDecodeError, KeyError):
+            continue
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text("".join(kept), encoding="utf-8")
+    temporary.replace(path)
+
+
+class OmniReMonitor:
+    """RGB quality and projected SMPL meshes of a DriveStudio trainer, in the R2/R3 dashboard format."""
+
+    def __init__(self, args, cfg, dataset, trainer, start_step=0):
+        from pytorch_msssim import SSIM
+
+        from .pose_monitor import select_observations, track_observations
+        from .quality import QualityHistory
+
+        self.args, self.cfg, self.dataset, self.trainer = args, cfg, dataset, trainer
+        self.cameras = list(cfg.data.pixel_source.cameras)
+        self.num_cams = dataset.pixel_source.num_cams
+        self.raw_scene = args.raw / args.scene
+        self.examples = read_json(args.quality_set)
+        self.ssim = SSIM(data_range=1.0, size_average=True, channel=3).cuda()
+        self.history = QualityHistory(args.quality_set, args.result, self.examples["scene_id"], "OmniRe",
+                                      args.run_id, start_step)
+        self.manifest = read_json(args.manifest)
+        instances = json.loads((args.processed / args.scene / "instances" / "instances_info.json").read_text())
+        self.people = smpl_people(dataset, cfg, instances) if "SMPLNodes" in cfg.model else []
+        self.slots = {uuid: slot for slot, (_, uuid) in enumerate(self.people)}
+        views = {(name, frame): None for name in OMNIRE_CAMERAS for frame in range(dataset.num_img_timesteps)}
+        probe_rows = select_observations(self.manifest, type("People", (), {"person_index": self.slots}), views)
+        rows = [*probe_rows, *track_observations(self.manifest, self.slots, views, {r["uuid"] for r in probe_rows})]
+        self.observations = {f"{r['camera']}/{r['frame']}/{r['uuid']}": {**r, "probe_update": False} for r in rows}
+        self.monitor = {"manifest_sha256": sha256(args.manifest), "observations": self.observations, "steps": []}
+        previous = args.monitor / "monitor.json"
+        if start_step and previous.is_file():
+            stored = read_json(previous)
+            if stored.get("observations") == self.observations:
+                self.monitor["steps"] = [entry for entry in stored["steps"] if entry["step"] <= start_step]
+        self.initial = None
+
+    def index(self, camera, frame):
+        return frame * self.num_cams + self.cameras.index(OMNIRE_CAMERAS.index(camera))
+
+    def original(self, camera, frame):
+        import numpy as np
+        import torch
+        from PIL import Image
+
+        with Image.open(self.raw_scene / "camera" / f"{camera}_camera" / f"{frame:02d}.jpg") as image:
+            return torch.from_numpy(np.array(image.convert("RGB"), dtype=np.float32) / 255).cuda()
+
+    def render(self, index):
+        import numpy as np
+        import torch
+
+        from models.video_utils import render_images
+
+        rendered = render_images(self.trainer, self.dataset.full_image_set, vis_indices=[index])["rgbs"][0]
+        return torch.from_numpy(np.asarray(rendered, dtype=np.float32)).cuda()
+
+    def capture(self, step):
+        import torch
+
+        from .quality import score_images
+
+        if self.history.steps and self.history.steps[-1]["step"] >= step:
+            return
+        self.trainer.set_eval()
+        with torch.no_grad():
+            def sample_pair(sample):
+                # SplatAD's targets: the original JPEG, back camera without its bottom 260 rows.
+                pred = self.render(self.index(sample["camera"], sample["frame"]))
+                return pred[:sample["height"]], self.original(sample["camera"], sample["frame"])[:sample["height"]]
+
+            self.history.add_step(step, score_images(self.examples, sample_pair, self.ssim))
+            if self.people:
+                self.capture_meshes(step)
+
+    def capture_meshes(self, step):
+        import torch
+        from PIL import Image
+
+        from .evaluate import project
+        from .pose_monitor import compare_meshes
+        from .prepare import front_pose_summary
+
+        node = self.trainer.models["SMPLNodes"]
+        if len(self.people) != node.num_instances:
+            raise ValueError(f"Expected {node.num_instances} OmniRe SMPL instances, matched {len(self.people)} UUIDs")
+        if self.initial is None:
+            self.initial = initial_pose(self.dataset.pixel_source, self.people, node.instances_trans.device)
+        results = {}
+        for i, (key, row) in enumerate(self.observations.items()):
+            slot = self.slots[row["uuid"]]
+            index = self.index(row["camera"], row["frame"])
+            _, cam_infos = self.dataset.full_image_set.get_image(index, 1)
+            view = torch.linalg.inv(cam_infos["camera_to_world"].float().cuda())
+            intrinsics = cam_infos["intrinsics"].float().cuda()
+            meshes = []
+            for params in (self.initial, None):
+                world, present, faces = posed_meshes(node, row["frame"], params)
+                meshes.append((project(world[slot], view, intrinsics), bool(present[slot])))
+            values, images = compare_meshes(self.original(row["camera"], row["frame"]), self.render(index),
+                                            row, *meshes, faces)
+            written = {}
+            for name, image in images.items():
+                relative = Path(f"step-{step:06d}") / f"observation-{i + 1}" / f"{name}.png"
+                (self.args.monitor / relative).parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(image).save(self.args.monitor / relative)
+                written[name] = relative.as_posix()
+            results[key] = {"metrics": values, "panels": written, "pose_only_rgb_probe": {"status": "tracked"},
+                            "actual_rgb_step": None}
+        tracks = {uuid: omnire_drift(node, self.initial, slot) for uuid, slot in self.slots.items()}
+        self.monitor["steps"] = [entry for entry in self.monitor["steps"] if entry["step"] < step]
+        self.monitor["steps"].append({"step": step, "results": results, "tracks": tracks})
+        dump_json(self.args.monitor / "monitor.json", self.monitor)
+        dump_json(self.args.monitor / "run.json", {
+            "scene": self.args.scene, "variant": "OmniRe", "mode": "pose_monitor", "run_id": self.args.run_id,
+            "videos": [], "monitor": "monitor.json", "pose_summary": front_pose_summary(self.manifest),
+            "step": step, "snapshots": len(self.monitor["steps"])})
+
+
+def save_resume_state(path, trainer, step):
+    """Model, Adam moments, step and RNG streams, written atomically next to the official checkpoints."""
+    import random
+
+    import numpy as np
+    import torch
+
+    state = {
+        "step": step, "model": trainer.state_dict(only_model=True), "optimizer": trainer.optimizer.state_dict(),
+        "rng": {"torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all(),
+                "numpy": np.random.get_state(), "python": random.getstate()},
+    }
+    temporary = path.with_suffix(".partial")
+    torch.save(state, temporary)
+    temporary.replace(path)
+
+
+def train(args):
+    """DriveStudio's tools/train.py loop, step for step, plus resume state, live monitoring and logs."""
+    import random
+    from argparse import Namespace
+
+    import numpy as np
+    import torch
+
+    folder = log_dir(args.output, args.run_id)
+    if (folder / "checkpoint_final.pth").is_file():
+        print(f"OmniRe already finished: {folder / 'checkpoint_final.pth'}")
+        return
+    state_path = folder / "resume.pth"
+    resume = None
+    if state_path.is_file():
+        try:
+            resume = torch.load(state_path, map_location="cpu", weights_only=False)
+        except Exception as error:  # A truncated write leaves no usable state.
+            print(f"Ignoring unreadable OmniRe resume state: {error}")
+    if folder.exists() and resume is None:
+        stale = folder.with_name(f"{folder.name}-interrupted-{time.strftime('%Y%m%d-%H%M%S')}")
+        folder.rename(stale)
+        print(f"No resume state. Moved the earlier OmniRe attempt to {stale}")
+    link_smpl(args.smpl)
+
+    from tools import train as upstream
+    from datasets.driving_dataset import DrivingDataset
+    from models.video_utils import render_images, save_videos
+    from utils.logging import MetricLogger
+    from utils.misc import import_str
+
+    namespace = Namespace(
+        config_file="configs/omnire.yaml", output_root=str(args.output), project="omnire", run_name=args.run_id,
+        enable_wandb=False, entity="", resume_from=None, render_video_postfix=None, save_catted_videos=False,
+        enable_viewer=False, viewer_port=8080,
+        opts=shared_settings(args.processed, args.scene, args.steps, args.seed, args.checkpoint_every),
+    )
+    cfg = upstream.setup(namespace)
+    dataset = DrivingDataset(data_cfg=cfg.data)
+    trainer = import_str(cfg.trainer.type)(
+        **cfg.trainer, num_timesteps=dataset.num_img_timesteps, model_config=cfg.model,
+        num_train_images=len(dataset.train_image_set), num_full_images=len(dataset.full_image_set),
+        test_set_indices=dataset.test_timesteps, scene_aabb=dataset.get_aabb().reshape(2, 3),
+        device=torch.device("cuda"),
+    )
+    if resume is not None:
+        trainer.load_state_dict(resume["model"], load_only_model=True, strict=True)
+        smpl = trainer.models.get("SMPLNodes")
+        if smpl is not None:
+            # DriveStudio does not store the k-NN table that knn_reg reads.
+            smpl.update_knn(smpl._means)
+    else:
+        trainer.init_gaussians_from_dataset(dataset=dataset)
+    render_keys = ["gt_rgbs", "rgbs", "Background_rgbs", "Dynamic_rgbs", "RigidNodes_rgbs",
+                   "DeformableNodes_rgbs", "SMPLNodes_rgbs"]
+    if cfg.render.vis_lidar:
+        render_keys.insert(0, "lidar_on_images")
+    if cfg.render.vis_sky:
+        render_keys += ["rgb_sky_blend", "rgb_sky"]
+    if cfg.render.vis_error:
+        render_keys.insert(render_keys.index("rgbs") + 1, "rgb_error_maps")
+    trainer.initialize_optimizer()
+    start = 0
+    if resume is not None:
+        trainer.optimizer.load_state_dict(resume["optimizer"])
+        rng = resume["rng"]
+        torch.set_rng_state(rng["torch"])
+        torch.cuda.set_rng_state_all(rng["cuda"])
+        np.random.set_state(rng["numpy"])
+        random.setstate(rng["python"])
+        start = resume["step"] + 1
+        print(f"Resuming OmniRe at step {start}", flush=True)
+    log = args.result / "training.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    truncate_jsonl(log, start)
+    monitor = OmniReMonitor(args, cfg, dataset, trainer, start_step=start)
+    if start == 0:
+        monitor.capture(0)
+
+    metric_logger = MetricLogger(delimiter="  ", output_file=os.path.join(cfg.log_dir, "metrics.json"))
+    step = start
+    for step in metric_logger.log_every(np.arange(start, trainer.num_iters + 1), cfg.logging.print_freq):
+        step = int(step)
+        if step % cfg.logging.vis_freq == 0 and cfg.logging.vis_freq > 0:
+            vis_timestep = np.linspace(0, dataset.num_img_timesteps, trainer.num_iters // cfg.logging.vis_freq + 1,
+                                       endpoint=False, dtype=int)[step // cfg.logging.vis_freq]
+            with torch.no_grad():
+                results = render_images(trainer=trainer, dataset=dataset.full_image_set, compute_metrics=True,
+                                        compute_error_map=cfg.render.vis_error,
+                                        vis_indices=[vis_timestep * dataset.pixel_source.num_cams + i
+                                                     for i in range(dataset.pixel_source.num_cams)])
+            save_videos(results, save_pth=os.path.join(cfg.log_dir, "images", f"step_{step}.png"),
+                        layout=dataset.layout, num_timestamps=1, keys=render_keys,
+                        save_seperate_video=cfg.logging.save_seperate_video,
+                        num_cams=dataset.pixel_source.num_cams, fps=cfg.render.fps, verbose=False)
+            del results
+            torch.cuda.empty_cache()
+
+        trainer.set_train()
+        trainer.preprocess_per_train_step(step=step)
+        trainer.optimizer_zero_grad()
+        image_infos, cam_infos = dataset.train_image_set.next(trainer._get_downscale_factor())
+        image_infos = {k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in image_infos.items()}
+        cam_infos = {k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in cam_infos.items()}
+        outputs = trainer(image_infos, cam_infos)
+        trainer.update_visibility_filter()
+        loss_dict = trainer.compute_losses(outputs=outputs, image_infos=image_infos, cam_infos=cam_infos)
+        for name, value in loss_dict.items():
+            if torch.isnan(value).any() or torch.isinf(value).any():
+                raise ValueError(f"Non-finite loss {name} at step {step}")
+        trainer.backward(loss_dict)
+        if step % args.log_every == 0:
+            # Before postprocessing, which may split or prune Gaussians and their gradients.
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(gradient_row(trainer, step, loss_dict), allow_nan=False) + "\n")
+        trainer.postprocess_per_train_step(step=step)
+
+        with torch.no_grad():
+            metric_dict = trainer.compute_metrics(outputs=outputs, image_infos=image_infos)
+        metric_logger.update(**{"train_metrics/" + k: v.item() for k, v in metric_dict.items()})
+        metric_logger.update(**{"train_stats/gaussian_num_" + k: v for k, v in trainer.get_gaussian_count().items()})
+        metric_logger.update(**{"losses/" + k: v.item() for k, v in loss_dict.items()})
+        metric_logger.update(**{"train_stats/lr_" + group["name"]: group["lr"]
+                                for group in trainer.optimizer.param_groups})
+
+        if step > 0 and (step % cfg.logging.saveckpt_freq == 0 or step == trainer.num_iters):
+            trainer.save_checkpoint(log_dir=cfg.log_dir, save_only_model=True, is_final=step == trainer.num_iters)
+        if trainer.optim_general.cache_buffer_freq > 0 and step > 0 and step % trainer.optim_general.cache_buffer_freq == 0:
+            trainer.set_eval()
+            with torch.no_grad():
+                dataset.pixel_source.update_downscale_factor(1 / dataset.pixel_source.buffer_downscale)
+                results = render_images(trainer=trainer, dataset=dataset.full_image_set)
+                dataset.pixel_source.reset_downscale_factor()
+                dataset.pixel_source.update_image_error_maps(results)
+            del results
+            torch.cuda.empty_cache()
+        completed = min(step + 1, args.steps)
+        if completed % args.monitor_every == 0 or step == trainer.num_iters:
+            monitor.capture(completed)
+        if (step + 1) % args.resume_every == 0 and step < trainer.num_iters:
+            save_resume_state(state_path, trainer, step)
+
+    upstream.do_evaluation(step=step, cfg=cfg, trainer=trainer, dataset=dataset, render_keys=render_keys,
+                           args=namespace)
+    if not (folder / "checkpoint_final.pth").is_file():
+        raise RuntimeError(f"OmniRe did not write {folder / 'checkpoint_final.pth'}")
+    state_path.unlink(missing_ok=True)
+
+
+def score(args):
+    """Offline fallback: score every saved checkpoint with the same monitor used during training."""
+    import torch
+
+    folder = log_dir(args.output, args.run_id)
+    cfg, dataset, trainer = load_trainer(folder)
+    monitor = OmniReMonitor(args, cfg, dataset, trainer)
+    monitor.history.steps.clear()
+    found = checkpoints(folder, args.steps)
+    if not found:
+        raise FileNotFoundError(f"No OmniRe checkpoint in {folder}")
+    for step, path in found:
+        trainer.resume_from_checkpoint(ckpt_path=str(path), load_only_model=True)
+        with torch.no_grad():
+            monitor.capture(step)
 
 
 def video(args):
@@ -457,20 +682,25 @@ def main():
         step.add_argument("--output", type=Path, required=True)
         step.add_argument("--run-id", required=True)
         step.add_argument("--steps", type=int, required=True)
+    for name in ("train", "score"):
+        step = commands.choices[name]
+        step.add_argument("--raw", type=Path, required=True)
+        step.add_argument("--quality-set", type=Path, required=True)
+        step.add_argument("--result", type=Path, required=True, help="Dashboard folder for quality and training logs")
+        step.add_argument("--manifest", type=Path, required=True)
+        step.add_argument("--monitor", type=Path, required=True,
+                          help="Dashboard folder for the projected OmniRe SMPL meshes")
     commands.choices["train"].add_argument("--smpl", type=Path, required=True)
     commands.choices["train"].add_argument("--seed", type=int, default=42)
     commands.choices["train"].add_argument("--checkpoint-every", type=int, default=2500)
-    commands.choices["score"].add_argument("--raw", type=Path, required=True)
+    commands.choices["train"].add_argument("--log-every", type=int, default=25)
+    commands.choices["train"].add_argument("--monitor-every", type=int, default=500)
+    commands.choices["train"].add_argument("--resume-every", type=int, default=1000)
     commands.choices["video"].add_argument("--raw", type=Path, required=True)
     commands.choices["video"].add_argument("--manifest", type=Path, required=True)
     commands.choices["video"].add_argument("--result", type=Path, required=True)
     commands.choices["video"].add_argument("--fps", type=int, default=60)
     commands.choices["video"].add_argument("--crf", type=int, default=16)
-    commands.choices["score"].add_argument("--quality-set", type=Path, required=True)
-    commands.choices["score"].add_argument("--result", type=Path, required=True)
-    commands.choices["score"].add_argument("--manifest", type=Path, required=True)
-    commands.choices["score"].add_argument("--monitor", type=Path, required=True,
-                                           help="Dashboard folder for the projected OmniRe SMPL meshes")
     args = parser.parse_args()
     if not args.scene.isdigit():
         parser.error("PandaSet scene ids are numeric")

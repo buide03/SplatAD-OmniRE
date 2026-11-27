@@ -74,8 +74,8 @@ Trọng số theo [configs/omnire.yaml](https://github.com/ziyc/drivestudio/blob
 Cell **OmniRe gốc để đối chứng** dựng môi trường `.deps/omnire-env` (Python 3.10, PyTorch của Colab, requirements DriveStudio, gsplat v1.3.0, nvdiffrast, PyTorch3D, smplx). Sau đó `scripts/omnire-baseline.sh` chạy ba bước:
 
 1. `prepare`: tiền xử lý PandaSet của DriveStudio (`images lidar calib pose dynamic_masks objects`), kiểm tra ID instance khớp với lượt pose, chép `smpl.pkl`, tạo mặt nạ bầu trời bằng SegFormer-B5 Cityscapes 1024 × 1024. Hướng dẫn gốc dùng mmseg với PyTorch 1.8, không chạy được trên Colab hiện tại, nên repo dùng cùng checkpoint qua Transformers.
-2. `train`: `tools/train.py` của DriveStudio, checkpoint mỗi 2.500 bước. DriveStudio không tiếp tục được lượt bị ngắt, nên lượt dở được đổi tên và train lại từ đầu.
-3. `score`: render từng checkpoint trên bộ ảnh đo, so với JPEG gốc như SplatAD, ghi `artifacts/<run_id>/<scene>-OmniRe-quality/quality.json`.
+2. `train`: vòng train lặp lại `tools/train.py` của DriveStudio theo đúng thứ tự. Repo lưu thêm `resume.pth` (mô hình, trạng thái Adam, bước, trạng thái ngẫu nhiên) mỗi 1.000 bước, nên lượt bị ngắt train tiếp từ đó; sau khi nạp, chỉ số k-NN của SMPL được dựng lại vì DriveStudio không lưu nó. Checkpoint gốc vẫn ghi mỗi 2.500 bước. Trong lúc train, gradient và loss được ghi mỗi 25 bước, PSNR/SSIM/L1 và mesh chiếu được đo mỗi 500 bước.
+3. `video`: xuất video ba camera trước từ checkpoint cuối ở 60 FPS. Lệnh `score` chấm lại các checkpoint đã lưu khi cần.
 
 ### Khôi phục trên Colab
 
@@ -84,6 +84,10 @@ Sau khi Colab ngắt, mở lại notebook với cùng `STAGE`, danh sách cảnh
 - **Checkpoint.** Colab lưu theo chu kỳ 100 bước và ở bước cuối. Khi nhận tín hiệu dừng, trainer thử lưu ở cuối bước cập nhật hiện tại. Nếu runtime bị tắt ngay, lượt sau dùng checkpoint đã ghi xong gần nhất. File `.partial` và checkpoint ZIP bị cắt dở được bỏ qua.
 - **Lỗi thư viện.** Notebook kiểm tra môi trường tách riêng cho train, 4D-Humans và chuyển SMPL. Nếu lệnh gặp lỗi import hoặc lỗi extension đã nhận diện, notebook dựng lại môi trường liên quan và thử một lần. Lượt train đọc lại checkpoint trước lần thử lại.
 - **Tra lỗi.** `artifacts/<run_id>/progress/progress.json` ghi trạng thái và lần thử của từng giai đoạn. Các file `*.log` cùng thư mục ghi lệnh, output và lỗi. Khi lỗi vẫn còn, mở log của giai đoạn báo lỗi rồi chạy lại notebook sau khi sửa nguyên nhân.
+
+### Theo dõi khi train
+
+Cả bốn mô hình ghi vào `artifacts/<run_id>/030-<mô hình>-quality/`: `quality.json` (PSNR, SSIM và L1 của toàn cảnh, người đi bộ, phương tiện) và `training.jsonl` (loss từng thành phần và chuẩn gradient của pose SMPL, Gaussian SMPL, MLP biến dạng, quỹ đạo hộp, Gaussian nền). Dashboard vẽ hai nhóm biểu đồ theo bước: L1/PSNR/SSIM của từng đối tượng, và gradient hoặc loss của từng mô hình. L1 vùng người là loss render của người đi bộ trên bộ ảnh đo cố định. Mục **Pose SMPL** chiếu mesh khởi tạo và mesh đang tinh chỉnh lên RGB gốc cho R2, R3 và OmniRe. Mỗi lượt chỉ giữ 3 checkpoint mới nhất trên Drive.
 
 ### PSNR và SSIM trong lúc train
 

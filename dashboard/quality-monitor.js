@@ -26,6 +26,20 @@
     return shared.at(-1) ?? all.at(-1);
   }
 
+  function drawCurve() {
+    const scope = byId("quality-curve-scope").value;
+    const metric = byId("quality-curve-metric").value;
+    const series = Object.values(reports).map(report => ({
+      name: report.variant,
+      points: report.steps.map(row => [row.step, row.scopes[scope]?.[metric]]).filter(([, y]) => Number.isFinite(y)),
+    }));
+    drawLineChart(byId("quality-curve"), series, {
+      format: metric === "psnr_db" ? v => `${decimal(v, 2)} dB` : v => decimal(v, 4),
+      caption: "PSNR, SSIM hoặc L1 theo bước huấn luyện",
+      empty: "Lượt này chưa ghi chỉ số này. Lượt cũ chỉ có PSNR và SSIM.",
+    });
+  }
+
   function draw() {
     const all = steps();
     if (!all.includes(selection)) selection = defaultStep(all);
@@ -79,6 +93,7 @@
         row.append(cell);
       }
     }
+    drawCurve();
   }
 
   async function update({detail: {render, quality}}) {
@@ -103,6 +118,7 @@
     draw();
   }
 
+  for (const id of ["quality-curve-scope", "quality-curve-metric"]) byId(id).addEventListener("change", drawCurve);
   input.addEventListener("change", () => {
     selection = Number(input.value);
     draw();

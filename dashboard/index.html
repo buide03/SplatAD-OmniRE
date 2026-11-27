@@ -8,8 +8,10 @@
   <title>SplatAD / OmniRE · PandaSet</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
+  <script src="/charts.js" defer></script>
   <script src="/pose-monitor.js" defer></script>
   <script src="/quality-monitor.js" defer></script>
+  <script src="/training-monitor.js" defer></script>
 </head>
 <body>
   <header class="top">
@@ -79,7 +81,28 @@
             <thead><tr id="quality-head"><th>Đối tượng</th></tr></thead>
           </table>
         </div>
+        <div class="curve-head">
+          <h3>Theo bước huấn luyện</h3>
+          <div class="pose-selectors">
+            <select id="quality-curve-scope" aria-label="Chọn đối tượng">
+              <option value="person">Người đi bộ</option><option value="vehicle">Phương tiện</option><option value="scene">Toàn cảnh</option>
+            </select>
+            <select id="quality-curve-metric" aria-label="Chọn chỉ số">
+              <option value="l1">L1 (loss render)</option><option value="psnr_db">PSNR (dB)</option><option value="ssim">SSIM</option>
+            </select>
+          </div>
+        </div>
+        <div id="quality-curve" class="curve"></div>
       </div>
+    </section>
+    <section id="training-monitor" class="pose-section" aria-labelledby="training-title">
+      <div class="section-head">
+        <h2 id="training-title">Gradient và loss khi train</h2>
+        <select id="training-signal" aria-label="Chọn gradient hoặc loss" hidden></select>
+      </div>
+      <p id="training-status" class="empty-note" role="status">Đang tải log huấn luyện…</p>
+      <p class="subtle">Mỗi đường là một mô hình, lấy từ batch ảnh RGB. Gradient vẽ trên trục log; loss làm mượt trung bình 8 mốc.</p>
+      <div id="training-chart" class="curve"></div>
     </section>
 
     <section id="pose-monitor" class="pose-section" aria-labelledby="pose-title">

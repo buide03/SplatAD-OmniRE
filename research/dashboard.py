@@ -50,7 +50,8 @@ class Dashboard(SimpleHTTPRequestHandler):
                 self.send_error(404)
                 return
             self.artifact(target, head)
-        elif path in ("/", "/index.html", "/styles.css", "/app.js", "/pose-monitor.js", "/quality-monitor.js"):
+        elif path in ("/", "/index.html", "/styles.css", "/app.js", "/charts.js", "/pose-monitor.js",
+                      "/quality-monitor.js", "/training-monitor.js"):
             if head:
                 super().do_HEAD()
             else:
