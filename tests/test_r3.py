@@ -80,6 +80,14 @@ def test_contact_prefit_respects_swing_foot_and_propagates_gradient():
 @pytest.fixture
 def pedestrian_model_class(monkeypatch):
     class Base(torch.nn.Module):
+        @property
+        def id(self):
+            return self.gauss_params["id"]
+
+        def populate_modules(self):
+            self.gauss_params = torch.nn.ParameterDict(self.native_gaussians)
+            self.actor_seeds = [2, 2]
+
         def step_post_backward(self, step):
             self.refined = (step, len(self.gauss_params["means"]))
 
@@ -96,6 +104,41 @@ def pedestrian_model_class(monkeypatch):
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module.PedestrianModel
+
+
+def test_r3_keeps_native_background_and_vehicle_seeds(pedestrian_model_class, monkeypatch):
+    module = sys.modules[pedestrian_model_class.__module__]
+    observations = [{"uuid": "person", "bin": "far", "usable": True,
+                     "stationary": False, "frame": frame} for frame in range(4)]
+    documents = {"manifest": {"selected_uuids": [], "tracks_sha256": "tracks", "observations": observations},
+                 "tracks": {"tracks": [], "body_sha256": "body"}}
+    monkeypatch.setattr(module, "read_json", documents.__getitem__)
+    monkeypatch.setattr(module, "validate_tracks", lambda document, _scene: document)
+    monkeypatch.setattr(module, "sha256", lambda path: path)
+    monkeypatch.setattr(module, "BodyModel", lambda _path: None)
+    model = pedestrian_model_class()
+    model.config = SimpleNamespace(variant="R3", scene_id="030", pedestrian_mcmc=True, far_deformation=True,
+                                   far_deformation_backend="omnire", far_max_gaussians=6000, ground_path=None,
+                                   smpl_init_opacity=0.99, manifest_path="manifest", manifest_digest="manifest",
+                                   tracks_path="tracks", body_path="body")
+    model.kwargs = {"metadata": {"trajectories": [{"uuid": "car", "label": "Car"},
+                                                  {"uuid": "person", "label": "Pedestrian"}]}}
+    model.dynamic_actors = SimpleNamespace(unique_timestamps=torch.arange(4) / 10,
+                                           actor_present_at_time=torch.ones(4, 2, dtype=torch.bool),
+                                           actor_sizes=torch.ones(2, 3))
+    widths = {"means": 3, "quats": 4, "scales": 3, "opacities": 1, "features_dc": 3, "features_rest": 13}
+    model.native_gaussians = {name: torch.arange(6 * width, dtype=torch.float32).reshape(6, width)
+                              for name, width in widths.items()}
+    model.native_gaussians["id"] = torch.nn.Parameter(torch.tensor([[0.], [0.], [1.], [1.], [2.], [2.]]),
+                                                      requires_grad=False)
+
+    model.populate_modules()
+
+    for name, values in model.native_gaussians.items():
+        assert torch.equal(model.gauss_params[name], values[[0, 1, 4, 5]])
+    assert model.actor_routes[0]["representation"] == "rigid"
+    assert model.actor_routes[1]["deformation_backend"] == "omnire"
+    assert model.background_gaussians == 2
 
 
 def test_mcmc_callback_and_resizing_leave_pedestrian_parameters_intact(pedestrian_model_class):

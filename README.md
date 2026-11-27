@@ -25,6 +25,8 @@ Preset mặc định `STAGE = "r3-omnire-smoke"` chạy cảnh `030` trong 750 b
 
 Backend OmniRe nhận vị trí cục bộ, thời gian và embedding 16 chiều để dự đoán độ lệch tâm và quaternion từng hạt. Adapter áp cuboid, bổ sung vận tốc biến dạng theo thời gian và giữ feature neural của SplatAD cho cả raster RGB và LiDAR. Hai backend dùng chung quy tắc chọn track và Gaussian khởi tạo của R3.
 
+R3 khởi tạo nền và phương tiện bằng `SplatADModel.populate_modules()`. Nền dùng seed LiDAR tĩnh và điểm nền bổ sung của SplatAD. Phương tiện dùng seed LiDAR trong hệ cuboid, khởi tạo đối xứng và giữ xác suất lật khi train theo preset SplatAD. R3 chỉ chuyển các hàng Gaussian của người đi bộ sang module riêng. Notebook train trên ba camera trước và LiDAR Pandar64. Các lượt R3 có thiết lập lật xe của SplatAD mang mã `r3-splatad-rigid`. Checkpoint cũ tiếp tục dùng cấu hình đã lưu.
+
 ### Khôi phục trên Colab
 
 Sau khi Colab ngắt, mở lại notebook với cùng `STAGE`, danh sách cảnh và cấu hình run. Notebook kiểm tra môi trường, dùng lại pose và manifest đã lưu, rồi tiếp tục từ checkpoint hoàn chỉnh mới nhất của từng cảnh và biến thể. Những cảnh đã có checkpoint đủ bước và video được bỏ qua. Colab giải nén lại cảnh còn dở nếu runtime mới đã mất bộ nhớ đệm cục bộ.

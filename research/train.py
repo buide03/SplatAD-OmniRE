@@ -329,7 +329,8 @@ def make_config(args):
             joint_smooth_weight=args.joint_smooth_weight, contact_weight=args.contact_weight, slip_weight=args.slip_weight,
             person_rgb_weight=args.person_rgb_weight,
         )
-        config.pipeline.model.actor_flip_probability = 0.0
+        if args.variant != "R3":
+            config.pipeline.model.actor_flip_probability = 0.0
         if args.mcmc_cap:
             config.pipeline.model.mcmc_cap_max = args.mcmc_cap
     config.pipeline.calc_fid_steps = ()

@@ -55,6 +55,7 @@ class PedestrianModel(SplatADModel):
     def populate_modules(self):
         cfg = self.config
         self.refinement_enabled = cfg.variant == "R3" and cfg.pedestrian_mcmc
+        # Build the native SplatAD bank before moving pedestrian rows into their own modules.
         super().populate_modules()
         self.people = nn.ModuleList()
         self.other_people = nn.ModuleList()
