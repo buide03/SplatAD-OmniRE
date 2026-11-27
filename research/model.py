@@ -7,7 +7,7 @@ from torch import nn
 
 from nerfstudio.models.splatad import SplatADModel, SplatADModelConfig
 
-from .deformable import GAUSSIAN_PARAMETERS, PedestrianGaussians
+from .deformable import GAUSSIAN_PARAMETERS, OmniReDeformationField, OmniRePedestrianGaussians, PedestrianGaussians
 from .geometry import BodyModel
 from .pose_constraints import PoseConstraints
 from .prepare import PEDESTRIANS, read_json, sha256, validate_tracks
@@ -30,6 +30,8 @@ class PedestrianModelConfig(SplatADModelConfig):
     smpl_init_opacity: float = 0.99
     pedestrian_mcmc: bool = False
     far_deformation: bool = False
+    far_deformation_backend: Literal["anchors", "omnire"] = "anchors"
+    far_deform_start: int = 3000
     far_max_gaussians: int = 6000
     ground_path: Path | None = None
     ground_digest: str = ""
@@ -56,6 +58,8 @@ class PedestrianModel(SplatADModel):
         super().populate_modules()
         self.people = nn.ModuleList()
         self.other_people = nn.ModuleList()
+        self.far_deformation_field = None
+        self.far_bound_losses = []
         self.person_regions = {}
         self.person_index = {}
         self.last_sensor = None
@@ -134,7 +138,7 @@ class PedestrianModel(SplatADModel):
         if selected - self.person_index.keys():
             print("Selected UUIDs without an SMPL actor:", sorted(selected - self.person_index.keys()))
         # Cuboid seeding ran before removal, keeping these points out of the background.
-        keep = ~torch.isin(self.id.flatten().long(), torch.tensor(replaced, dtype=torch.long))
+        keep = ~torch.isin(self.id.flatten().long(), torch.tensor(replaced, device=self.id.device, dtype=torch.long))
         for name, parameter in self.gauss_params.items():
             self.gauss_params[name] = nn.Parameter(parameter.detach()[keep], requires_grad=parameter.requires_grad)
 
@@ -149,6 +153,7 @@ class PedestrianModel(SplatADModel):
             deform = cfg.far_deformation and len(far_frames.get(trajectory["uuid"], ())) >= 4
             if not (deform or self.refinement_enabled):
                 continue
+            omnire = deform and cfg.far_deformation_backend == "omnire"
             rows = (ids == index).nonzero(as_tuple=True)[0]
             if deform and len(rows) > cfg.far_max_gaussians:
                 generator = torch.Generator(device=rows.device).manual_seed(torch.initial_seed() + index)
@@ -156,10 +161,19 @@ class PedestrianModel(SplatADModel):
             if not len(rows):
                 continue
             seed = {key: self.gauss_params[key][rows] for key in GAUSSIAN_PARAMETERS}
-            node = PedestrianGaussians(index, seed, dynamic.unique_timestamps, dynamic.actor_present_at_time[:, index],
-                                       dynamic.actor_sizes[index], deform)
+            node_args = (index, seed, dynamic.unique_timestamps, dynamic.actor_present_at_time[:, index],
+                         dynamic.actor_sizes[index])
+            if omnire:
+                if self.far_deformation_field is None:
+                    self.far_deformation_field = OmniReDeformationField().to(seed["means"])
+                node = OmniRePedestrianGaussians(*node_args)
+            else:
+                node = PedestrianGaussians(*node_args, deform)
             self.other_people.append(node)
-            self.actor_routes[index].update(representation="deformable" if deform else "rigid", gaussians=len(rows))
+            route = self.actor_routes[index]
+            route.update(representation="deformable" if deform else "rigid", gaussians=len(rows))
+            if deform:
+                route["deformation_backend"] = cfg.far_deformation_backend
             moved.append(index)
         return moved
 
@@ -167,14 +181,27 @@ class PedestrianModel(SplatADModel):
         gaussians = super().scene_gaussians(time)
         if self.training:
             self.last_actor_time = time.detach()
+            self.far_bound_losses = []
         articulated = [node.get_gaussians_at(time, self.human_motion) for node in self.people]
         if self.other_people:
             boxes, present = self.dynamic_actors.get_boxes2world(time, flatten=False)
             boxes, present = boxes.reshape(-1, 4, 4), present.reshape(-1)
             velocities = self.dynamic_actors.get_velocities(time).reshape(-1, 6)
-            articulated.extend(node.get_gaussians_at(time, boxes[node.actor_index],
-                               velocities[node.actor_index], present[node.actor_index])
-                               for node in self.other_people)
+            field = self.far_deformation_field
+            visible = present.tolist() if field is not None else None
+            for node in self.other_people:
+                index = node.actor_index
+                args = (time, boxes[index], velocities[index], present[index])
+                if isinstance(node, OmniRePedestrianGaussians):
+                    if not visible[index]:
+                        continue
+                    if self.step >= self.config.far_deform_start:
+                        packet, outside = node.deformed_gaussians_at(*args, field)
+                        articulated.append(packet)
+                        if self.training:
+                            self.far_bound_losses.append(outside)
+                        continue
+                articulated.append(node.get_gaussians_at(*args))
         if not articulated:
             return gaussians
         return {name: torch.cat([value, *(person[name] for person in articulated)])
@@ -184,6 +211,9 @@ class PedestrianModel(SplatADModel):
         if self.refinement_enabled:
             # ADMCMC operates on the Gaussian parameter bank, independent of raster indices.
             super().step_post_backward(step)
+
+    def update_to_step(self, step):
+        self.step = max(0, step)
 
     def load_state_dict(self, state_dict, **kwargs):
         if self.refinement_enabled and "gauss_params.means" in state_dict:
@@ -212,6 +242,9 @@ class PedestrianModel(SplatADModel):
             if deformation:
                 magnitude, smooth = torch.stack([torch.stack(pair) for pair in deformation]).mean(0)
                 losses.update(deformation_magnitude=0.05 * magnitude, deformation_smooth=0.02 * smooth)
+            if self.far_bound_losses:
+                losses["deformation_out_of_bound"] = torch.stack(self.far_bound_losses).mean()
+                self.far_bound_losses = []
             boxes = self.person_regions.get(self.last_rgb_index, ())
             if boxes and self.config.person_rgb_weight:
                 target = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
@@ -240,4 +273,8 @@ class PedestrianModel(SplatADModel):
             offsets = [person.offsets for person in self.other_people if person.offsets is not None]
             if offsets:
                 groups["pedestrian_deformation"] = offsets
+        if self.far_deformation_field is not None:
+            groups["pedestrian_deformation_network"] = list(self.far_deformation_field.parameters())
+            groups["pedestrian_deformation_embedding"] = [person.embedding for person in self.other_people
+                                                          if isinstance(person, OmniRePedestrianGaussians)]
         return groups

@@ -8,13 +8,22 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 | **R1** | Một Gaussian trên mỗi vertex SMPL | Gaussian người, pose cố định |
 | **R2** | Khởi tạo giống R1 | Gaussian, root translation, root rotation và 23 rotation khớp |
 | **R2/vận tốc 0** | Cùng checkpoint R2 | Đặt riêng vận tốc Gaussian người về 0 khi render |
+| **R3** | SMPL và Gaussian biến dạng cho track xa qua bộ lọc | Pose, tiếp đất, biến dạng người xa và MCMC nền/xe tùy cấu hình |
 
 ### Bắt đầu trên Colab
 
 1. Đặt `pandaset.zip` trong `MyDrive/SplatAD+OmniRe/`, mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` để ưu tiên ZIP trong thư mục dự án, rồi tự dò My Drive và Shared Drives nếu ZIP này vắng. Có thể chỉ định ZIP khác hoặc thư mục đã giải nén trong `PANDASET_PATH`. Colab giải nén tạm các cảnh đã chọn vào `/content/pandaset-from-drive` và kiểm tra ảnh, scan LiDAR và cuboid của cảnh.
 2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R1/R2, chọn GPU và tải gói `SMPL_python_v.1.1.0.zip` theo hướng dẫn OmniRe. Đặt file `basicmodel_neutral_lbs_10_207_0_v1.1.0.pkl` hoặc gói đã giải nén vào `MyDrive/SplatAD+OmniRe/`. Notebook tìm file Neutral trong `SMPL_python_v.1.1.0/smpl/models/`, kể cả khi gói có thêm một thư mục cùng tên bên ngoài. Notebook cũng nhận cùng bản v1.1 dưới tên `SMPL_NEUTRAL.pkl` ở thư mục dự án. [Trang tải SMPL](https://smpl.is.tue.mpg.de/download.php)
-3. Mặc định `STAGE = "curriculum"` train SplatAD gốc rồi R2 qua `028 → 011 → 008` với 10.000 bước cho mỗi mô hình trên mỗi cảnh. Chọn `STAGE = "scene"` để dùng cùng ngân sách cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước. Tất cả các preset train RGB ở độ phân giải gốc từ bước 0. Các run Colab có `fullres` trong tên thư mục checkpoint. Lượt theo bộ đo và adapter v2 có `rgbq-v2` trong mã run.
+3. `STAGE = "curriculum"` train SplatAD gốc rồi R2 qua `028 → 011 → 008` với 10.000 bước cho mỗi mô hình trên mỗi cảnh. Chọn `STAGE = "scene"` để dùng cùng ngân sách cho một cảnh hoặc sửa `SCENES` để chọn cảnh. Dùng `SCENES = "all"` cùng `VARIANTS = ("R0",)` để chạy bộ dữ liệu theo cấu hình rigid. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước. Tất cả các preset train RGB ở độ phân giải gốc từ bước 0. Các run Colab có `fullres` trong tên thư mục checkpoint. Lượt theo bộ đo và adapter v2 có `rgbq-v2` trong mã run.
 4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Chọn **Gốc** hoặc **Render** trong dashboard để phát cả ba camera cùng lúc. Trong `MyDrive/SplatAD+OmniRe/`, `inputs/` và `pose-init/` chứa dữ liệu đã chuẩn bị, `runs/` chứa checkpoint, `artifacts/` chứa video, monitor và metric.
+
+### Thử biến dạng OmniRe trong R3
+
+Preset mặc định `STAGE = "r3-omnire-smoke"` chạy cảnh `030` trong 750 bước. Nó bật MLP từ bước 100, dùng lại dữ liệu Drive và xuất ba camera ở 60 FPS. Preset chỉ train R3. Dashboard có thể dùng số đo SplatAD đã lưu khi trùng bộ ảnh đo và mốc bước. Xem `scene_routes.json` để kiểm tra UUID được gán backend `omnire` và `training.jsonl` để xem gradient của mạng và embedding.
+
+Để chạy đủ 10.000 bước, đặt `STAGE = "scene"`, `RESEARCH_VARIANT = "R3"` và chọn cảnh. `R3_OPTIONS["far_deformation_backend"]` nhận `omnire` hoặc `anchors`. Mỗi cấu hình ghi checkpoint riêng. Với CLI, bật bằng `--far-deformation --far-deformation-backend omnire`. `--far-deform-start` đặt số bước trước khi kích hoạt biến dạng, mặc định là 3.000.
+
+Backend OmniRe nhận vị trí cục bộ, thời gian và embedding 16 chiều để dự đoán độ lệch tâm và quaternion từng hạt. Adapter áp cuboid, bổ sung vận tốc biến dạng theo thời gian và giữ feature neural của SplatAD cho cả raster RGB và LiDAR. Hai backend dùng chung quy tắc chọn track và Gaussian khởi tạo của R3.
 
 ### Khôi phục trên Colab
 

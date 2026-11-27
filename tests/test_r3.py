@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from research.deformable import PedestrianGaussians
+from research.deformable import OmniReDeformationField, OmniRePedestrianGaussians, PedestrianGaussians
 from research.ground import fit_road_plane
 from research.pose_constraints import PoseConstraints
 from research.smpl_nodes import SMPLTrack
@@ -77,10 +77,14 @@ def test_contact_prefit_respects_swing_foot_and_propagates_gradient():
     assert torch.isfinite(person.translation.grad).all() and person.translation.grad[1, 2] > 0
 
 
-def test_mcmc_callback_and_resizing_leave_pedestrian_parameters_intact(monkeypatch):
+@pytest.fixture
+def pedestrian_model_class(monkeypatch):
     class Base(torch.nn.Module):
         def step_post_backward(self, step):
             self.refined = (step, len(self.gauss_params["means"]))
+
+        def scene_gaussians(self, time):
+            return self.base_packet
 
     dependency = ModuleType("nerfstudio.models.splatad")
     dependency.SplatADModel = Base
@@ -91,8 +95,11 @@ def test_mcmc_callback_and_resizing_leave_pedestrian_parameters_intact(monkeypat
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
+    return module.PedestrianModel
 
-    model = module.PedestrianModel()
+
+def test_mcmc_callback_and_resizing_leave_pedestrian_parameters_intact(pedestrian_model_class):
+    model = pedestrian_model_class()
     model.gauss_params = torch.nn.ParameterDict({
         "means": torch.nn.Parameter(torch.zeros(2, 3)),
         "id": torch.nn.Parameter(torch.zeros(2, 1), requires_grad=False),
@@ -110,3 +117,65 @@ def test_mcmc_callback_and_resizing_leave_pedestrian_parameters_intact(monkeypat
     assert model.refined == (600, 5)
     assert model.people[0].weight is original
     assert not model.gauss_params["id"].requires_grad
+
+
+def test_omnire_uses_r3_adapter_and_restores_warmup_from_checkpoint(pedestrian_model_class):
+    means = torch.tensor([[-0.2, 0., -0.5], [0.2, 0., -0.5]])
+    seed = {"means": means, "quats": torch.tensor([[1., 0., 0., 0.]]).repeat(2, 1),
+            "scales": torch.full_like(means, -3), "opacities": torch.zeros(2, 1),
+            "features_dc": torch.ones_like(means), "features_rest": torch.ones(2, 13)}
+    time = torch.tensor(10.1)
+    times = torch.tensor([10., 10.1, 10.2])
+    size = torch.tensor([0.8, 0.8, 1.7])
+    box = torch.tensor([[0., -1., 0., 3.], [1., 0., 0., 2.], [0., 0., 1., 0.], [0., 0., 0., 1.]])
+    velocity = torch.tensor([2., 0., 0., 0., 0., 0.])
+    presence = torch.tensor([True, False])
+
+    def build_model():
+        model = pedestrian_model_class()
+        model.refinement_enabled = False
+        model.config = SimpleNamespace(far_deform_start=100)
+        model.people = torch.nn.ModuleList()
+        model.other_people = torch.nn.ModuleList(
+            OmniRePedestrianGaussians(i, seed, times, torch.ones(3, dtype=torch.bool), size) for i in range(2)
+        )
+        model.far_deformation_field = OmniReDeformationField()
+        model.dynamic_actors = SimpleNamespace(get_boxes2world=lambda *_args, **_kwargs: (box.repeat(2, 1, 1), presence),
+                                               get_velocities=lambda _: velocity.repeat(2, 1))
+        with torch.no_grad():
+            model.base_packet = model.other_people[0].get_gaussians_at(time, box, velocity, True)
+        return model
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(7)
+        model = build_model()
+        restored = build_model().eval()
+    model.update_to_step(99)
+    rigid = model.scene_gaussians(time)
+    assert torch.equal(rigid["means"][2:], rigid["means"][:2])
+    assert not model.far_bound_losses
+    model.update_to_step(100)
+    output = model.scene_gaussians(time)
+    assert len(output["means"]) == 4  # Absent track adds no points to the renderer.
+    assert not torch.allclose(output["means"][2:], rigid["means"][2:])
+    assert not torch.allclose(output["quats"][2:], rigid["quats"][2:])
+    assert torch.allclose(output["quats"][2:].norm(dim=-1), torch.ones(2))
+    assert torch.equal(output["features_rest"], rigid["features_rest"])
+    assert torch.isfinite(output["velocities"]).all()
+    assert not torch.allclose(output["velocities"][2:], rigid["velocities"][2:])
+    assert len(model.far_bound_losses) == 1
+
+    (output["means"][2:].sum() + output["quats"][2:, 1].sum()).backward()
+    person = model.other_people[0]
+    assert person.means.grad is None
+    assert person.embedding.grad.abs().sum() > 0
+    assert model.other_people[1].embedding.grad is None
+    assert model.far_deformation_field.position_delta.weight.grad.abs().sum() > 0
+    assert model.far_deformation_field.rotation_delta.weight.grad.abs().sum() > 0
+
+    restored.update_to_step(100)
+    restored.load_state_dict(model.state_dict())
+    with torch.no_grad():
+        replay = restored.scene_gaussians(time)
+    for key in output:
+        torch.testing.assert_close(output[key], replay[key])

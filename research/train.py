@@ -97,6 +97,9 @@ class ResearchTrainer(Trainer):
             print(f"Background: {model.background_seeds:,} LiDAR seeds and {model.background_gaussians:,} Gaussians")
             for row in model.actor_routes:
                 print(row)
+            if getattr(model.config, "far_deformation_backend", None) == "omnire":
+                count = sum(row.get("deformation_backend") == "omnire" for row in model.actor_routes)
+                print(f"OmniRe deformation: {count} tracks, active from step {model.config.far_deform_start}", flush=True)
         if getattr(model.config, "variant", None) == "R3" and model.config.person_rgb_weight:
             indices = camera_indices(self.pipeline.datamanager)
             constrained = {row["uuid"] for row in model.actor_routes if row["representation"] in ("smpl", "deformable")}
@@ -162,6 +165,9 @@ class ResearchTrainer(Trainer):
             row["gradients"]["smpl_gaussians"] = gradient_stats(
                 [p for tag, group in groups.items() if tag.startswith("smpl_") and tag not in POSE_GROUPS for p in group]
             )
+            for tag in ("pedestrian_deformation_network", "pedestrian_deformation_embedding"):
+                if tag in groups:
+                    row["gradients"][tag] = gradient_stats(groups[tag])
             row["pose"] = {}
             with torch.no_grad():
                 for node in model.people:
@@ -316,6 +322,8 @@ def make_config(args):
             body_path=args.body.resolve() if args.body else None,
             manifest_path=manifest, manifest_digest=sha256(manifest) if manifest else "",
             pedestrian_mcmc=bool(args.mcmc_cap), far_deformation=args.far_deformation,
+            far_deformation_backend=args.far_deformation_backend or "anchors",
+            far_deform_start=args.far_deform_start if args.far_deform_start is not None else 3000,
             ground_path=args.ground.resolve() if args.ground else None,
             ground_digest=sha256(args.ground) if args.ground else "", ground_prefit=args.ground_prefit,
             joint_smooth_weight=args.joint_smooth_weight, contact_weight=args.contact_weight, slip_weight=args.slip_weight,
@@ -340,6 +348,9 @@ def make_config(args):
         for name in GAUSSIAN_PARAMETERS:
             config.optimizers[f"pedestrian_{name}"] = copy.deepcopy(config.optimizers[name])
         config.optimizers["pedestrian_deformation"] = {"optimizer": AdamOptimizerConfig(lr=1e-3), "scheduler": None}
+        if args.far_deformation_backend == "omnire":
+            for name in ("pedestrian_deformation_network", "pedestrian_deformation_embedding"):
+                config.optimizers[name] = {"optimizer": AdamOptimizerConfig(lr=1e-3), "scheduler": None}
     if args.variant in TRAINABLE_POSE_VARIANTS:
         for name, lr in zip(POSE_GROUPS, (3e-4, 2e-4, 2e-4), strict=True):
             config.optimizers[name] = {"optimizer": AdamOptimizerConfig(lr=lr), "scheduler": None}
@@ -356,6 +367,9 @@ def main():
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--mcmc-cap", type=int, default=0, help="R3 MCMC cap for background and rigid non-pedestrian actors")
     parser.add_argument("--far-deformation", action="store_true", help="R3 local deformation for far pedestrian tracks")
+    parser.add_argument("--far-deformation-backend", choices=("anchors", "omnire"),
+                        help="Use the six-anchor R3 field or the OmniRe conditional MLP")
+    parser.add_argument("--far-deform-start", type=int, help="Rigid warm-up steps before enabling OmniRe (default: 3000)")
     parser.add_argument("--ground", type=Path, help="R3 local ground planes from research.ground")
     parser.add_argument("--ground-prefit", action="store_true", help="Apply a bounded vertical fit before R3 optimization")
     parser.add_argument("--joint-smooth-weight", type=float, default=0.02)
@@ -395,6 +409,10 @@ def main():
     if args.mcmc_cap < 0 or any(not 0 <= value < float("inf") for value in
                               (args.joint_smooth_weight, args.contact_weight, args.slip_weight, args.person_rgb_weight)):
         parser.error("MCMC cap and loss weights must be nonnegative")
+    if args.far_deformation_backend and not args.far_deformation:
+        parser.error("--far-deformation-backend requires --far-deformation")
+    if args.far_deform_start is not None and (args.far_deformation_backend != "omnire" or args.far_deform_start < 0):
+        parser.error("--far-deform-start requires the OmniRe backend and a nonnegative value")
     if (args.mcmc_cap or args.far_deformation or args.ground or args.ground_prefit) and (args.resume or args.variant != "R3"):
         parser.error("Set R3 research options when starting a new R3 run. Resume uses the saved configuration.")
     if args.ground_prefit and not args.ground:

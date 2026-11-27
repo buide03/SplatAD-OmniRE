@@ -1,7 +1,9 @@
-"""Bounded local deformation for pedestrian tracks with sparse SMPL observations."""
+"""Local pedestrian deformation and conversion to SplatAD Gaussian inputs."""
 
 import torch
 from torch import nn
+from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .geometry import matrix_quat, quat_matrix
 
@@ -53,12 +55,15 @@ class PedestrianGaussians(nn.Module):
             local = local + delta
             deform_velocity = (self.influence @ (end - start) * (self.max_offset / dt)).detach()
             deform_velocity = deform_velocity * (self.present[hi] & self.present[lo])
+        return self.scene_packet(local, self.quats, deform_velocity, box, velocity, visible)
+
+    def scene_packet(self, local, quats, deform_velocity, box, velocity, visible):
         rotation = box[:3, :3]
         linear, angular = velocity.split(3)
         rigid_velocity = linear + torch.cross(angular.expand_as(local), local, dim=-1) @ rotation.T
         return {
             "means": local @ rotation.T + box[:3, 3],
-            "quats": matrix_quat(rotation @ quat_matrix(self.quats)),
+            "quats": matrix_quat(rotation @ quat_matrix(quats)),
             "scales": self.scales.exp(),
             "opacities": self.opacities.sigmoid().squeeze(-1) * visible,
             "features_dc": self.features_dc,
@@ -75,3 +80,68 @@ class PedestrianGaussians(nn.Module):
         acceleration = offsets[2:] - 2 * offsets[1:-1] + offsets[:-2]
         smooth = (acceleration.abs().mean(dim=(1, 2)) * valid).sum() / valid.sum().clamp_min(1)
         return at_time.square().mean(), smooth
+
+
+class OmniReDeformationField(nn.Module):
+    """OmniRe's ConditionalDeformNetwork adapted from DriveStudio (MIT)."""
+
+    embedding_dim = 16
+
+    def __init__(self):
+        super().__init__()
+        bands, depth, width = 10, 8, 256
+        self.register_buffer("frequencies", 2.0 ** torch.arange(bands), persistent=False)
+        self.skip = depth // 2
+        input_dim = 4 * (1 + 2 * bands) + self.embedding_dim
+        self.layers = nn.ModuleList(
+            nn.Linear(input_dim if i == 0 else width + (input_dim if i == self.skip + 1 else 0), width)
+            for i in range(depth)
+        )
+        self.position_delta = nn.Linear(width, 3)
+        self.rotation_delta = nn.Linear(width, 4)
+
+    def encode(self, values):
+        angles = values.unsqueeze(-2) * self.frequencies[:, None]
+        waves = torch.stack((angles.sin(), angles.cos()), dim=-2).flatten(start_dim=-3)
+        return torch.cat((values, waves), dim=-1)
+
+    def forward(self, centers, time, embedding):
+        time_features = self.encode(time.reshape(1, 1)).expand(len(centers), -1)
+        inputs = torch.cat((self.encode(centers), time_features, embedding.expand(len(centers), -1)), dim=-1)
+        hidden = inputs
+        for i, layer in enumerate(self.layers):
+            hidden = layer(hidden).relu()
+            if i == self.skip:
+                hidden = torch.cat((inputs, hidden), dim=-1)
+        return self.position_delta(hidden), self.rotation_delta(hidden)
+
+
+class OmniRePedestrianGaussians(PedestrianGaussians):
+    def __init__(self, actor_index, seed, times, present, size):
+        super().__init__(actor_index, seed, times, present, size, deform=False)
+        self.register_buffer("size", size.detach().clone())
+        self.embedding = nn.Parameter(seed["means"].new_empty(OmniReDeformationField.embedding_dim).uniform_())
+
+    def deformed_gaussians_at(self, time, box, velocity, visible, field):
+        duration = (self.times[-1] - self.times[0]).clamp_min(1e-6)
+        time = time.to(self.times).reshape(()).clamp(self.times[0], self.times[-1])
+        normalized_time = (time - self.times[0]) / duration
+        canonical = self.means.detach()
+        centers = 2 * canonical / self.size[2].clamp_min(1e-6)
+        if self.training and torch.is_grad_enabled():
+            delta, rotation_delta = checkpoint(field, centers, normalized_time, self.embedding,
+                                               use_reentrant=False, preserve_rng_state=False)
+        else:
+            delta, rotation_delta = field(centers, normalized_time, self.embedding)
+        local = canonical + delta
+        quats = F.normalize(self.quats, dim=-1) + rotation_delta
+
+        # SplatAD uses velocities in meters per second for rolling shutter and LiDAR.
+        with torch.no_grad():
+            direction = torch.where(self.times[-1] - time >= 0.005, 1.0, -1.0)
+            shifted = (time + direction * 0.005).clamp(self.times[0], self.times[-1])
+            shifted_delta, _ = field(centers, (shifted - self.times[0]) / duration, self.embedding)
+            deform_velocity = (shifted_delta - delta) * direction / (shifted - time).abs().clamp_min(1e-6)
+
+        outside = (local.abs() - self.size / 2).relu().mean()
+        return self.scene_packet(local, quats, deform_velocity, box, velocity, visible), outside
