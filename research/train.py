@@ -343,10 +343,8 @@ def make_config(args):
             body_path=args.body.resolve() if args.body else None,
             manifest_path=manifest, manifest_digest=sha256(manifest) if manifest else "",
         )
-        if args.variant == "R2":
-            config.pipeline.model.actor_flip_probability = 0.0
-        else:
-            # R3 keeps SplatAD's MCMC bank and actor flipping; only pedestrians leave the bank.
+        # R2 and R3 keep SplatAD's MCMC bank and actor flipping; only pedestrians leave the bank.
+        if args.variant == "R3":
             config.pipeline.model.deform_start = args.deform_start
             config.pipeline.model.smpl_follow_box = args.smpl_follow_box
             if args.ground:

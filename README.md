@@ -5,9 +5,9 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 | Cấu hình | Biểu diễn người đi bộ | Tối ưu |
 | --- | --- | --- |
 | **SplatAD** | Người đi bộ không được tách khỏi nền | Mô hình gốc tại commit đã pin, MCMC đến 5 triệu Gaussian |
-| **R2** | Một Gaussian trên mỗi vertex SMPL. Người không có SMPL là actor rigid | Gaussian, root translation, root rotation và 23 rotation khớp. Số Gaussian nền cố định |
+| **R2** | Một Gaussian trên mỗi vertex SMPL. Người không có SMPL là actor rigid | Gaussian, root translation, root rotation và 23 rotation khớp. Nền và xe giữ MCMC và lật actor của SplatAD |
 | **R2/vận tốc 0** | Cùng checkpoint R2 | Đặt riêng vận tốc Gaussian người về 0 khi render |
-| **R3** | Như R2. Người di chuyển không có SMPL dùng Gaussian biến dạng của OmniRe | R2 cộng MCMC và lật actor của SplatAD, regularizer SMPL của OmniRe, tiếp đất theo LiDAR |
+| **R3** | Như R2. Người di chuyển không có SMPL dùng Gaussian biến dạng của OmniRe | R2 cộng regularizer SMPL của OmniRe, tiếp đất theo LiDAR, SMPL gắn vào hộp đang học |
 | **OmniRe** | Mã DriveStudio gốc: SMPL cho người có pose, Gaussian biến dạng cho người còn lại | `configs/omnire.yaml` với `pandaset/6cams`, chỉ thay các thiết lập chung bên dưới |
 
 R2 và R3 chỉ cải tiến phần người đi bộ của SplatAD. Nền, xe, decoder, loss RGB/LiDAR và GSplat để render giữ nguyên của SplatAD. Gaussian người đi qua adapter `scene_gaussians` vào cùng hai lời gọi rasterization RGB và LiDAR.
@@ -27,11 +27,11 @@ Mỗi mô hình giữ lịch train riêng của nó, ví dụ OmniRe tăng dần
 
 ### R3: sửa các vấn đề của R2
 
-Lượt R2 cảnh `030` trên Drive (10.000 bước) cho PSNR vùng người cao hơn SplatAD khoảng 1,5 dB. PSNR toàn cảnh thấp hơn 2,4 dB, vùng xe thấp hơn 1,4 dB, và khoảng cách này tăng dần từ bước 2.000. R3 xử lý từng nguyên nhân:
+Lượt R2 cũ cảnh `030` trên Drive (10.000 bước, khi R2 còn tắt MCMC) cho PSNR vùng người cao hơn SplatAD khoảng 1,5 dB. PSNR toàn cảnh thấp hơn 2,4 dB, vùng xe thấp hơn 1,4 dB, và khoảng cách này tăng dần từ bước 2.000. R3 xử lý từng nguyên nhân:
 
 | Vấn đề của R2 | Nguyên nhân | R3 |
 | --- | --- | --- |
-| Metric toàn cảnh và xe thấp hơn SplatAD | R2 tắt MCMC (410 nghìn Gaussian nền cố định so với giới hạn 5 triệu) và đặt xác suất lật actor về 0 | Giữ MCMC và lật actor của SplatAD. MCMC của gsplat chỉ sửa `gauss_params`, nên Gaussian SMPL và Gaussian biến dạng không bị ảnh hưởng |
+| Metric toàn cảnh và xe thấp hơn SplatAD | R2 tắt MCMC (410 nghìn Gaussian nền cố định so với giới hạn 5 triệu) và đặt xác suất lật actor về 0 | Bật lại MCMC và lật actor của SplatAD cho cả R2 và R3, nên ba mô hình chỉ khác cách khởi tạo và chuyển động của người đi bộ. MCMC của gsplat chỉ sửa `gauss_params`, nên Gaussian SMPL và Gaussian biến dạng không bị ảnh hưởng. Số liệu R2 cũ không so được với R2 mới, cần train lại |
 | Người ở xa trượt như một khối | Người không có SMPL đi theo actor rigid | Người đi bộ di chuyển (tổng quãng đường cuboid ≥ 0,5 m) dùng `DeformableNodes` của OmniRe: MLP 8 × 256 theo vị trí, thời gian và embedding 16 chiều, bật từ bước 3.000, tối đa 5.000 Gaussian mỗi người, ngừng học tâm canonical khi MLP bật, phạt Gaussian ra ngoài cuboid |
 | Chuyển động người gần giật | Pose từng frame được tối ưu độc lập | `trans_temporal_smooth` (bước nhảy ngẫu nhiên 1–5 pose, w 0,01) và `joint_smooth` (w 0,01) của OmniRe |
 | Chân lẫn với mặt đường | Gaussian SMPL lớn hoặc dẹt lan xuống đường, chân không có ràng buộc tiếp đất | `max_s_square` (w 0,05), `sharp_shape` (tỉ lệ ≤ 10), `knn_reg` (w 0,001) của OmniRe. Mặt đường cục bộ fit từ LiDAR: bàn chân đang chạm đất bám mặt đường, không xuyên xuống, không trượt |
@@ -109,7 +109,7 @@ Notebook chạy OmniRe Option 2 để chiếu cuboid người lên ảnh, trích
 ### Quy ước và số liệu
 
 - **Pose.** JSON gắn UUID sau khi đối chiếu ID nội bộ và sibling LiDAR. Rotation root của pose quan sát lấy từ camera 4D-Humans chọn. Hướng gốc của frame được bù dùng hệ world. Translation căn tâm bbox mesh đã skinning theo tâm cuboid tại timestamp của pose. Timestamp tính theo mốc giữa ảnh, xấp xỉ bằng timestamp camera PandaSet trừ 10 ms. Adapter đổi sang hệ cảnh và trừ epoch bằng độ chính xác đầy đủ trước khi cast float32.
-- **Gaussian.** DA-pose canonical với trọng số LBS cố định, tâm tại vertex, quaternion theo pháp tuyến, scale theo diện tích và latent 13 kênh. Gaussian SMPL khởi tạo opacity riêng ở 0.99 theo OmniRe. R2 và R3 ghi checkpoint và metric dưới cùng mã run với SplatAD để đo từ bước 0. Tâm và hướng nhận gradient ở cả hai nhánh renderer. Vận tốc world nội suy từ biến đổi khớp lân cận. R2 giữ số hạt cố định nên callback refinement tắt. Ở R2, UUID không có track SMPL đủ dùng đi theo actor rigid. Trong khoảng trống dài của track đã chọn, opacity của SMPL bằng 0.
+- **Gaussian.** DA-pose canonical với trọng số LBS cố định, tâm tại vertex, quaternion theo pháp tuyến, scale theo diện tích và latent 13 kênh. Gaussian SMPL khởi tạo opacity riêng ở 0.99 theo OmniRe. R2 và R3 ghi checkpoint và metric dưới cùng mã run với SplatAD để đo từ bước 0. Tâm và hướng nhận gradient ở cả hai nhánh renderer. Vận tốc world nội suy từ biến đổi khớp lân cận. MCMC của SplatAD chạy trên bank nền và xe, còn số Gaussian SMPL cố định. Ở R2, UUID không có track SMPL đủ dùng đi theo actor rigid. Trong khoảng trống dài của track đã chọn, opacity của SMPL bằng 0.
 - **Kiểm kê.** Cự ly là khoảng cách từ tâm camera đến tâm cuboid. Nhóm gần ≤15 m, trung bình 15–30 m, xa ≥30 m. Ngưỡng chiều cao bbox mặc định là 28 px. Bộ kiểm kê phân biệt pose trực tiếp từ 4D-Humans với pose do OmniRe nội suy. Ghi rõ trường che khuất và tay/chân nhìn thấy qua review thủ công.
 - **RGB.** Render đủ nền, xe và người tại frame gốc. Tính MAE, PSNR, SSIM và LPIPS AlexNet cho toàn ảnh và vùng người từ bbox GT. MAE, PSNR và SSIM dùng crop tối thiểu 11 × 11 px. LPIPS và overlay dùng vùng ngữ cảnh tối thiểu 64 × 64 px. Trường hợp ảnh khớp hoàn toàn dùng PSNR 120 dB để lưu JSON.
 - **LiDAR.** Range MAE tính trên tia có phản hồi GT nằm trong cuboid của UUID, xác định từ chính raster đã dùng để render. Xuất số hit trước và sau lọc quantile. Thiếu hit được ghi là thiếu mẫu. Range panel hiển thị batch raster đầu tiên, metric dùng toàn bộ batch.

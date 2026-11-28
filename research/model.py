@@ -60,14 +60,14 @@ class PedestrianModelConfig(SplatADModelConfig):
 
 
 class PedestrianModel(SplatADModel):
-    """R2: SMPL pedestrians with trainable pose on a fixed SplatAD Gaussian bank.
+    """R2: SMPL pedestrians with trainable pose on SplatAD's own Gaussian bank.
 
-    R3 adds what R2 lacked: SplatAD's own MCMC and actor flipping for background and vehicles,
-    OmniRe deformable nodes for moving pedestrians without SMPL, OmniRe's SMPL regularizers and
-    LiDAR ground contact for near feet.
+    Background and vehicles train exactly as in SplatAD, including MCMC and actor flipping, so the
+    variants differ only in how pedestrians are initialized and moved. R3 adds OmniRe deformable
+    nodes for moving pedestrians without SMPL, OmniRe's SMPL regularizers, LiDAR ground contact
+    and SMPL anchored to the learned box.
     """
 
-    refinement_enabled = False
     human_motion = True
 
     def split_seed_points(self, seed_points):
@@ -79,8 +79,6 @@ class PedestrianModel(SplatADModel):
     def populate_modules(self):
         cfg = self.config
         r3 = cfg.variant == "R3"
-        # R2 keeps a fixed bank; R3 lets SplatAD's MCMC grow background and vehicles as in the baseline.
-        self.refinement_enabled = r3
         super().populate_modules()
         self.people = nn.ModuleList()
         self.deformable_people = nn.ModuleList()
@@ -262,20 +260,16 @@ class PedestrianModel(SplatADModel):
             # Evaluation and replay must know whether the deformation MLP was active at this checkpoint.
             self.step = max(0, step)
 
-    def step_post_backward(self, step):
-        # R2: raster info holds several parameter groups, so the point budget stays fixed.
-        if self.refinement_enabled:
-            # R3: gsplat's MCMC only edits gauss_params (background and rigid actors).
-            super().step_post_backward(step)
+    # SplatAD's step_post_backward runs unchanged: gsplat's MCMC only edits gauss_params (background
+    # and rigid actors), never the SMPL or deformable Gaussians appended after them.
 
     def load_state_dict(self, state_dict, **kwargs):
-        if self.refinement_enabled:
-            # MCMC resizes the bank between checkpoints. Optimizers are rebuilt after loading.
-            for name, parameter in self.gauss_params.items():
-                saved = state_dict[f"gauss_params.{name}"]
-                if saved.shape != parameter.shape:
-                    self.gauss_params[name] = nn.Parameter(torch.empty_like(saved, device=parameter.device),
-                                                           requires_grad=parameter.requires_grad)
+        # MCMC resizes the bank between checkpoints. Optimizers are rebuilt after loading.
+        for name, parameter in self.gauss_params.items():
+            saved = state_dict[f"gauss_params.{name}"]
+            if saved.shape != parameter.shape:
+                self.gauss_params[name] = nn.Parameter(torch.empty_like(saved, device=parameter.device),
+                                                       requires_grad=parameter.requires_grad)
         # Fixed SMPL counts preserve the parameter objects and their optimizer contract.
         return nn.Module.load_state_dict(self, state_dict, **kwargs)
 

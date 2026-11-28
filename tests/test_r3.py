@@ -135,6 +135,8 @@ def test_deformable_pedestrian_is_rigid_before_warmup_and_follows_omnire_after()
 @pytest.fixture
 def pedestrian_model_class(monkeypatch):
     class Base(torch.nn.Module):
+        refinement_enabled = True  # splatad.patch default
+
         @property
         def id(self):
             return self.gauss_params["id"]
@@ -239,13 +241,14 @@ def build_model(module, monkeypatch, variant, observations=None):
     return model
 
 
-def test_r2_routes_are_unchanged_and_bank_stays_fixed(pedestrian_model_class, monkeypatch):
+def test_r2_routes_are_unchanged_and_bank_refines_like_splatad(pedestrian_model_class, monkeypatch):
     model = build_model(pedestrian_model_class, monkeypatch, "R2")
     assert [route["representation"] for route in model.actor_routes] == ["rigid", "smpl", "rigid", "rigid"]
     assert torch.equal(model.gauss_params["id"].flatten(), torch.tensor([0., 0., 2., 2., 3., 3., 4., 4.]))
-    assert not model.refinement_enabled and not model.deformable_people and not model.smpl_regularizers
+    assert model.refinement_enabled and not model.deformable_people and not model.smpl_regularizers
+    model.step = 600
     model.step_post_backward(600)
-    assert not hasattr(model, "refined")
+    assert model.refined == (600, 8)
     groups = model.get_param_groups()
     assert {"smpl_means", *pedestrian_model_class.POSE_GROUPS} <= set(groups)
     assert not any(name.startswith("deformable_") for name in groups)
