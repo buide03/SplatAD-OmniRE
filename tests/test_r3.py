@@ -1,4 +1,4 @@
-"""CPU checks for R3: OmniRe regularizers, deformable pedestrians, ground contact and bank routing."""
+"""CPU checks for R3: OmniRe regularizers, far walkers on a borrowed gait, ground contact and bank routing."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from research.deformable import DeformablePedestrian, OmniReDeformationField
+from research.gait import gait_cycle, local_mesh, sample_cycle
 from research.ground import fit_road_plane
 from research.pose_constraints import PoseConstraints
 from research.smpl_nodes import SMPLTrack
@@ -29,11 +29,24 @@ def toy_body():
                            canonical=lambda _: (vertices, joints, torch.eye(4).repeat(24, 1, 1)))
 
 
-def toy_track(uuid="person", roots=None, frames=11):
+def toy_track(uuid="person", roots=None, frames=11, period=None):
     roots = roots if roots is not None else [[0.02 * i, 0, 0] for i in range(frames)]
     return {"uuid": uuid, "betas": [0] * 10, "frames": [
         {"valid": True, "frame_idx": i, "timestamp_s": i / 10, "root_translation": root,
-         "root_quat_wxyz": IDENTITY, "body_quats_wxyz": [IDENTITY] * 23} for i, root in enumerate(roots)]}
+         "root_quat_wxyz": IDENTITY, "body_quats_wxyz": stride_pose(i / 10, period) if period else [IDENTITY] * 23}
+        for i, root in enumerate(roots)]}
+
+
+def about_x(degrees):
+    half = np.radians(degrees) / 2
+    return [float(np.cos(half)), float(np.sin(half)), 0.0, 0.0]
+
+
+def stride_pose(time, period):
+    swing = 20 * np.sin(2 * np.pi * time / period)
+    pose = [IDENTITY] * 23
+    pose[0], pose[1], pose[3], pose[4] = about_x(swing), about_x(-swing), about_x(swing / 2), about_x(-swing / 2)
+    return pose
 
 
 def test_ground_plane_is_local_and_allows_slopes():
@@ -98,38 +111,6 @@ def test_regularizer_skips_times_between_track_segments():
     assert SMPLRegularizer(person).losses(person, torch.tensor(0.4), 10, ALL_WEIGHTS) == {}
     losses = SMPLRegularizer(person).losses(person, torch.tensor(0.1), 10, ALL_WEIGHTS)
     assert "joint_smooth" not in losses
-
-
-def deformable_seed(count=3):
-    means = torch.tensor([[-0.2, 0., -0.5], [0.2, 0., -0.5], [0., 0., 0.4]])[:count]
-    return {"means": means, "quats": torch.tensor([[1., 0., 0., 0.]]).repeat(count, 1),
-            "scales": torch.full_like(means, -3), "opacities": torch.zeros(count, 1),
-            "features_dc": torch.ones_like(means), "features_rest": torch.ones(count, 13)}
-
-
-def test_deformable_pedestrian_is_rigid_before_warmup_and_follows_omnire_after():
-    seed = deformable_seed()
-    node = DeformablePedestrian(0, seed, torch.tensor([10., 10.1, 10.2, 10.3]), torch.tensor([0.8, 0.8, 1.7]))
-    box = torch.tensor([[0., -1., 0., 3.], [1., 0., 0., 2.], [0., 0., 1., 0.], [0., 0., 0., 1.]])
-    velocity = torch.tensor([2., 0., 0., 0., 0., 0.])
-    time = torch.tensor(10.1)
-    rigid, outside = node.get_gaussians_at(time, box, velocity, torch.tensor(True))
-    assert outside is None
-    torch.testing.assert_close(rigid["means"], seed["means"] @ box[:3, :3].T + box[:3, 3])
-    torch.testing.assert_close(rigid["velocities"], velocity[:3].expand(3, 3))
-
-    torch.manual_seed(0)
-    field = OmniReDeformationField()
-    deformed, outside = node.get_gaussians_at(time, box, velocity, torch.tensor(True), field)
-    assert not torch.allclose(deformed["means"], rigid["means"])
-    assert torch.isfinite(deformed["velocities"]).all() and outside is not None
-    (deformed["means"].sum() + deformed["quats"][:, 1].sum() + outside).backward()
-    assert node.means.grad is None  # OmniRe stop_optimizing_canonical_xyz
-    assert node.embedding.grad.abs().sum() > 0
-    assert field.position_delta.weight.grad.abs().sum() > 0
-    assert field.rotation_delta.weight.grad.abs().sum() > 0
-    hidden, _ = node.get_gaussians_at(time, box, velocity, torch.tensor(False), field)
-    assert not hidden["opacities"].any()
 
 
 @pytest.fixture
@@ -205,7 +186,7 @@ def close_rows(uuid, frames, height=200, bin_name="near", source="4d_humans"):
              "bbox_height_px": height, "pose_source": source} for f in frames]
 
 
-def build_model(module, monkeypatch, variant, observations=None, seeds=None):
+def build_model(module, monkeypatch, variant, observations=None, seeds=None, donor_walks=True):
     walk = torch.eye(4).repeat(4, 1, 1)
     walk[:, 0, 3] = torch.arange(4) * 0.4
     trajectories = [
@@ -217,7 +198,7 @@ def build_model(module, monkeypatch, variant, observations=None, seeds=None):
     if observations is None:
         observations = close_rows("smpl", range(6))
     documents = {"manifest": {"selected_uuids": ["smpl"], "tracks_sha256": "tracks", "observations": observations},
-                 "tracks": {"tracks": [toy_track("smpl")], "body_sha256": "body"}}
+                 "tracks": {"tracks": [toy_track("smpl", period=0.6 if donor_walks else None)], "body_sha256": "body"}}
     monkeypatch.setattr(module, "read_json", documents.__getitem__)
     monkeypatch.setattr(module, "validate_tracks", lambda document, _scene: document)
     monkeypatch.setattr(module, "sha256", lambda path: path)
@@ -226,9 +207,9 @@ def build_model(module, monkeypatch, variant, observations=None, seeds=None):
     model.config = SimpleNamespace(
         variant=variant, scene_id="030", smpl_init_opacity=0.99, manifest_path="manifest", manifest_digest="manifest",
         tracks_path="tracks", body_path="body", feature_dim=13, ground_path=None, ground_prefit=True,
-        deform_start=100, deform_max_gaussians=5000, deform_min_travel=0.5,
+        gait_min_travel=0.5,
         trans_smooth_weight=0.01, joint_smooth_weight=0.01, knn_weight=0.001, max_scale_weight=0.05,
-        sharp_shape_weight=1.0, out_of_bound_weight=1.0, contact_weight=0.1, slip_weight=0.1,
+        sharp_shape_weight=1.0, contact_weight=0.1, slip_weight=0.1,
         smpl_follow_box=True, smpl_min_frames=5, smpl_min_box_px=80.0, local_offset_weight=0.01,
         deform_seed_path=None, deform_seed_digest="", deform_seed_min_points=64, init_scale=0.2)
     if seeds is not None:
@@ -248,23 +229,25 @@ def test_r2_routes_are_unchanged_and_bank_refines_like_splatad(pedestrian_model_
     model = build_model(pedestrian_model_class, monkeypatch, "R2")
     assert [route["representation"] for route in model.actor_routes] == ["rigid", "smpl", "rigid", "rigid"]
     assert torch.equal(model.gauss_params["id"].flatten(), torch.tensor([0., 0., 2., 2., 3., 3., 4., 4.]))
-    assert model.refinement_enabled and not model.deformable_people and not model.smpl_regularizers
+    assert model.refinement_enabled and len(model.people) == 1 and not model.smpl_regularizers
     model.step = 600
     model.step_post_backward(600)
     assert model.refined == (600, 8)
     groups = model.get_param_groups()
     assert {"smpl_means", *pedestrian_model_class.POSE_GROUPS} <= set(groups)
-    assert not any(name.startswith("deformable_") for name in groups)
 
 
 def test_r3_moves_only_walking_pedestrians_and_refines_the_rest(pedestrian_model_class, monkeypatch):
     model = build_model(pedestrian_model_class, monkeypatch, "R3")
-    assert [route["representation"] for route in model.actor_routes] == ["rigid", "smpl", "deformable", "rigid"]
+    assert [route["representation"] for route in model.actor_routes] == ["rigid", "smpl", "smpl_gait", "rigid"]
     # Car, idle pedestrian and background stay in SplatAD's bank, with their native rows.
     assert torch.equal(model.gauss_params["id"].flatten(), torch.tensor([0., 0., 3., 3., 4., 4.]))
     torch.testing.assert_close(model.gauss_params["means"], model.native_gaussians["means"][[0, 1, 6, 7, 8, 9]])
-    torch.testing.assert_close(model.deformable_people[0].means, model.native_gaussians["means"][[4, 5]])
-    assert model.refinement_enabled and len(model.smpl_regularizers) == 1
+    assert model.refinement_enabled and len(model.smpl_regularizers) == len(model.people) == 2
+    assert model.person_index == {"smpl": 0, "walker": 1}
+    route = model.actor_routes[2]
+    assert route["gait_donor"] == "smpl" and route["gait_period_s"] == pytest.approx(0.6)
+    assert route["rigid_gaussians_replaced"] == 2 and route["gaussians"] == 6
     model.step = 600
     model.step_post_backward(600)
     assert model.refined == (600, 6)
@@ -280,23 +263,65 @@ def test_r3_moves_only_walking_pedestrians_and_refines_the_rest(pedestrian_model
     assert model.people[0].translation is person
 
     groups = model.get_param_groups()
-    assert {"deformable_means", "deformable_embedding", "deformable_network", "smpl_translation"} <= set(groups)
+    assert {"smpl_means", "smpl_translation", "smpl_body_rotation"} <= set(groups)
+    assert not any(name.startswith("deformable_") for name in groups)
+    assert len(groups["smpl_body_rotation"]) == 2  # The far walker's pose trains like a near one.
 
     model.last_actor_time = torch.tensor(0.5)
-    model.deform_bounds = [torch.tensor(0.5)]
     losses = model.r3_losses()
     assert {"r3_trans_smooth", "r3_joint_smooth", "r3_knn", "r3_max_scale"} <= set(losses)
-    assert float(losses["r3_out_of_bound"]) == pytest.approx(0.5)
-    model.update_to_step(2500)
-    assert model.step == 2500
+    assert "r3_out_of_bound" not in losses
 
 
-def test_r3_sends_a_far_smpl_track_to_the_deformable_node(pedestrian_model_class, monkeypatch):
+def test_r3_far_walker_swings_its_legs_with_the_borrowed_cycle(pedestrian_model_class, monkeypatch):
+    model = build_model(pedestrian_model_class, monkeypatch, "R3")
+    donor, walker = model.people
+    # The donor's hips swing +-20 degrees every 0.6 s; the walker's box moves at the donor's speed,
+    # so it replays the cycle at the same cadence, starting where its own path starts.
+    hips = walker.initial_body[:, 0]
+    angles = 2 * torch.atan2(hips[:, 1], hips[:, 0]).rad2deg()
+    assert angles.max() - angles.min() > 30
+    torch.testing.assert_close(walker.body, walker.initial_body)
+    route = model.actor_routes[2]
+    assert route["gait_cadence_hz"] == pytest.approx(1 / 0.6, abs=0.02) and route["gait_turn_deg"] == pytest.approx(0)
+    # The stance foot stands on the box floor and the pelvis is centred in the box.
+    mesh = local_mesh(walker, walker.root, walker.body, walker.translation).detach()
+    assert float(mesh[..., 2].amin(-1).median()) == pytest.approx(-0.5, abs=1e-4)
+    pelvis = walker.joints[0] + walker.translation
+    torch.testing.assert_close(pelvis[:, :2].mean(0), torch.zeros(2), atol=1e-5, rtol=0)
+    # It renders through the learned box like every R3 SMPL track.
+    output = walker.get_gaussians_at(torch.tensor(0.25))
+    output["means"][:, 1].sum().backward()
+    assert model.dynamic_actors.offset.grad[:, 2, 1].sum() > 0
+
+
+def test_gait_cycle_finds_the_period_and_turns_with_the_walker():
+    person = SMPLTrack(toy_track(frames=31, period=1.0), toy_body(), torch.eye(4), 0, 13, 0.99, True)
+    rotations = torch.eye(3).repeat(31, 1, 1)
+    positions = torch.zeros(31, 3)
+    positions[:, 0] = torch.arange(31) * 0.14  # 1.4 m/s along the box's own x axis
+    cycle = gait_cycle(person, rotations, positions)
+    assert cycle["period_s"] == pytest.approx(1.0) and cycle["stride_m"] == pytest.approx(1.4, abs=0.05)
+    assert cycle["closing_deg"] < 1 and cycle["swing_deg"] > 10
+    torch.testing.assert_close(cycle["direction"], torch.tensor([1.0, 0.0]))
+    # Half a cycle later the legs have swapped.
+    root, body, _ = sample_cycle(cycle, torch.tensor([0.0, 0.5]))
+    torch.testing.assert_close(body[0, 0], body[1, 1], atol=1e-5, rtol=0)
+    # A track that only stands has no cycle to lend.
+    standing = SMPLTrack(toy_track(frames=31), toy_body(), torch.eye(4), 0, 13, 0.99, True)
+    assert gait_cycle(standing, rotations, positions) is None
+
+
+def test_r3_without_a_walking_donor_leaves_far_walkers_rigid(pedestrian_model_class, monkeypatch):
+    model = build_model(pedestrian_model_class, monkeypatch, "R3", donor_walks=False)
+    assert [route["representation"] for route in model.actor_routes] == ["rigid", "smpl", "rigid", "rigid"]
+    assert model.actor_routes[2]["gait_skipped"] == "no near SMPL walker with a closed leg cycle"
+
+
+def test_r3_without_any_near_smpl_track_has_nothing_to_borrow(pedestrian_model_class, monkeypatch):
     far = close_rows("smpl", range(8), height=60, bin_name="far")
-    model = build_model(pedestrian_model_class, monkeypatch, "R3", observations=far)
-    assert not model.people
-    assert [route["representation"] for route in model.actor_routes] == ["rigid", "deformable", "deformable", "rigid"]
-    assert model.actor_routes[1]["smpl_rejected"] == "0 close direct frames"
+    with pytest.raises(ValueError, match="no usable SMPL track"):
+        build_model(pedestrian_model_class, monkeypatch, "R3", observations=far)
 
 
 def test_r3_smpl_follows_the_learned_box_and_feeds_it_gradients(pedestrian_model_class, monkeypatch):
@@ -354,16 +379,16 @@ def gradient_matrix(module, monkeypatch):
         "opacities": bank["opacities"].sigmoid().squeeze(-1), "features_dc": bank["features_dc"],
         "features_rest": bank["features_rest"], "velocities": torch.zeros_like(bank["means"]),
     }
-    model.step = 200  # past deform_start=100, so OmniRe's MLP is active
-    walker = model.deformable_people[0]
+    walker = model.people[1]
+    with torch.no_grad():
+        walker.translation[5] += torch.tensor([0.02, -0.03, 0.01])
     groups = {
         "Gaussian nền/xe": [bank[name] for name in ("means", "quats", "scales", "opacities", "features_dc")],
         "Gaussian SMPL": [person.means, person.quats, person.scales, person.opacities, person.features_dc],
         "Pose SMPL": [person.translation, person.root, person.body],
         "Quỹ đạo hộp": [model.dynamic_actors.offset],
-        "Gaussian biến dạng": [walker.quats, walker.scales, walker.opacities, walker.features_dc],
-        "Tâm canonical biến dạng": [walker.means],
-        "MLP biến dạng": [*model.deformation_field.parameters(), walker.embedding],
+        "Gaussian người xa": [walker.means, walker.quats, walker.scales, walker.opacities, walker.features_dc],
+        "Pose người xa": [walker.translation, walker.root, walker.body],
     }
     weights = None
 
@@ -383,98 +408,47 @@ def gradient_matrix(module, monkeypatch):
                 if any(p.grad is not None and p.grad.abs().sum() > 0 for p in params)}
 
     rows = {"render (RGB + LiDAR)": touched(render_stand_in())}
-    model.scene_gaussians(torch.tensor(0.5))  # sets last_actor_time and the out-of-bound term
+    model.scene_gaussians(torch.tensor(0.5))  # sets last_actor_time
     for name, value in model.r3_losses().items():
         rows[name] = touched(value)
         model.scene_gaussians(torch.tensor(0.5))
     return rows, list(groups)
 
 
-def test_r3_gradients_reach_mesh_mlp_gaussians_and_box(pedestrian_model_class, monkeypatch):
+def test_r3_gradients_reach_meshes_poses_and_box(pedestrian_model_class, monkeypatch):
     rows, groups = gradient_matrix(pedestrian_model_class, monkeypatch)
     print("\n" + " | ".join(["loss", *groups]))
     for loss, reached in rows.items():
         print(" | ".join([loss, *("x" if group in reached else "." for group in groups)]))
-    assert rows["render (RGB + LiDAR)"] == {"Gaussian nền/xe", "Gaussian SMPL", "Pose SMPL", "Quỹ đạo hộp",
-                                           "Gaussian biến dạng", "MLP biến dạng"}
-    # stop_optimizing_canonical_xyz: after the warm-up only the MLP moves deformable positions.
-    assert "Tâm canonical biến dạng" not in rows["render (RGB + LiDAR)"]
-    motion = {"Pose SMPL", "Quỹ đạo hộp"}
-    assert rows["r3_trans_smooth"] == rows["r3_joint_smooth"] == motion
-    assert rows["r3_local_offset"] == {"Pose SMPL"}
-    assert rows["r3_foot_contact"] == rows["r3_ground_penetration"] == rows["r3_foot_slip"] == motion
-    assert rows["r3_knn"] == rows["r3_max_scale"] == rows["r3_sharp_shape"] == {"Gaussian SMPL"}
-    assert rows["r3_out_of_bound"] == {"MLP biến dạng"}
+    assert rows["render (RGB + LiDAR)"] == set(groups)
+    # Smoothing reaches both walkers; ground contact only the near one, which has LiDAR ground frames.
+    assert rows["r3_trans_smooth"] == rows["r3_joint_smooth"] == {"Pose SMPL", "Pose người xa", "Quỹ đạo hộp"}
+    assert rows["r3_local_offset"] == {"Pose SMPL", "Pose người xa"}
+    assert rows["r3_foot_contact"] == rows["r3_ground_penetration"] == rows["r3_foot_slip"] == {"Pose SMPL", "Quỹ đạo hộp"}
+    assert rows["r3_knn"] == rows["r3_max_scale"] == {"Gaussian SMPL", "Gaussian người xa"}
+    assert "r3_out_of_bound" not in rows
 
 
-def dataset_seed(count, lidar):
+def dataset_seed(count, lidar, colour=(200, 30, 20)):
     generator = np.random.default_rng(4)
-    points = (generator.random((count, 3)) - 0.5).astype(np.float32) * 0.8
-    colors = np.tile(np.array([[200, 30, 20]], np.uint8), (count, 1))
+    points = (generator.random((count, 3)) - 0.5).astype(np.float32) * 1.2
+    colors = np.tile(np.array([colour], np.uint8), (count, 1))
     return points, colors, np.r_[np.zeros(lidar, np.uint8), np.ones(count - lidar, np.uint8)]
 
 
-def test_r3_seeds_deformable_pedestrians_from_the_dataset(pedestrian_model_class, monkeypatch):
-    points, colors, source = dataset_seed(100, 70)
+def test_r3_paints_the_far_walker_from_the_dataset(pedestrian_model_class, monkeypatch):
+    points, colors, source = dataset_seed(1000, 300)
     model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": (points, colors, source)})
     route = model.actor_routes[2]
-    assert route["representation"] == "deformable" and route["seed"] == "dataset"
-    assert (route["gaussians"], route["seed_lidar"], route["seed_fill"], route["bank_rows_replaced"]) == (100, 70, 30, 2)
-    node = model.deformable_people[0]
-    torch.testing.assert_close(node.means.detach(), torch.from_numpy(points))
-    torch.testing.assert_close(node.features_dc.detach(), torch.tensor([[200., 30., 20.]]).expand(100, 3) / 255)
-    # Same starting opacity as SplatAD's bank, scales from neighbour spacing, unit quaternions.
-    assert torch.equal(node.opacities.detach(), torch.full((100, 1), 4.0))
-    assert node.scales.shape == (100, 3) and torch.isfinite(node.scales).all()
-    torch.testing.assert_close(node.quats.detach().norm(dim=-1), torch.ones(100))
-    assert node.features_rest.shape == (100, 13)
-    # The walker's bank rows still leave the bank.
-    assert torch.equal(model.gauss_params["id"].flatten(), torch.tensor([0., 0., 3., 3., 4., 4.]))
+    assert (route["colour_seed_points"], route["colour_seed_lidar"]) == (1000, 300)
+    assert 0 < route["colour_matched"] <= 1
+    torch.testing.assert_close(model.people[1].features_dc.detach(),
+                               torch.tensor([[200., 30., 20.]]).expand(6, 3) / 255)
+    # The near SMPL track keeps the default grey.
+    torch.testing.assert_close(model.people[0].features_dc.detach(), torch.full((6, 3), 0.5))
 
 
-def test_r3_keeps_splatad_seed_when_the_dataset_has_too_few_points(pedestrian_model_class, monkeypatch):
+def test_r3_keeps_grey_far_walkers_when_the_dataset_has_too_few_points(pedestrian_model_class, monkeypatch):
     model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": dataset_seed(10, 10)})
-    route = model.actor_routes[2]
-    assert route["seed"] == "splatad" and route["gaussians"] == 2
-    torch.testing.assert_close(model.deformable_people[0].means, model.native_gaussians["means"][[4, 5]])
-
-
-def test_deform_probe_tells_a_walking_mlp_from_a_static_one(pedestrian_model_class, monkeypatch):
-    from research.deform_probe import deformation_stats, gaussian_stats, summary, verdict
-
-    points, colors, source = dataset_seed(100, 70)
-    points[:, 2] *= 2  # Spread over the box height so the lowest part counts as legs.
-    model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": (points, colors, source)})
-    node = model.deformable_people[0]
-    field = model.deformation_field
-    for layer in (field.position_delta, field.rotation_delta):
-        torch.nn.init.zeros_(layer.weight)
-        torch.nn.init.zeros_(layer.bias)
-    static = deformation_stats(model, node)
-    assert static["measured"] and static["frames"] == 11 and static["leg_gaussians"] > 0
-    assert static["temporal_std_cm"]["p90"] == 0 and not static["walks"]
-
-    class Swing(torch.nn.Module):
-        """Legs swing 20 cm forward and back over the sequence; the body stays put."""
-        def forward(self, centers, time, embedding):
-            legs = (centers[:, 2:] < -0.3).float()
-            delta = torch.zeros_like(centers)
-            delta[:, :1] = 0.2 * torch.sin(2 * torch.pi * 2 * time) * legs
-            return delta, torch.zeros(len(centers), 4)
-
-    model.deformation_field = Swing()
-    walking = deformation_stats(model, node)
-    assert walking["walks"] and walking["leg_temporal_std_cm"]["p90"] > 10
-    assert walking["temporal_std_cm"]["p10"] == 0  # The torso does not move.
-
-    gaussians = gaussian_stats(node)
-    assert gaussians["gaussians"] == 100 and gaussians["visible"] == 100
-    person = {"uuid": "walker", "route": model.actor_routes[2], "gaussians": gaussians, "deformation": static,
-              "observations": {"bbox_height_px": {"p50": 30.0}},
-              "view": {"crop_fraction": 0.0004, "mlp_pixel_change": 0.0, "crop_psnr_db": 20.0,
-                       "crop_psnr_without_mlp_db": 20.0}}
-    person["verdict"] = verdict(person)
-    assert person["verdict"] == ["offsets_static_over_time", "tiny_in_image", "mlp_barely_changes_pixels",
-                                 "few_visible_gaussians"]
-    report = {"step": 9999, "deform_start": 100, "mlp_active": True, "deformable": [person]}
-    assert "offsets_static_over_time" in summary(report)
+    assert "colour_seed_points" not in model.actor_routes[2]
+    torch.testing.assert_close(model.people[1].features_dc.detach(), torch.full((6, 3), 0.5))

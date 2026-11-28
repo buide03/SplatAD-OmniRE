@@ -4,6 +4,7 @@ from torch import nn
 
 from .geometry import apply, blend, joint_transforms, matrix_quat, quat_matrix, mesh_gaussians, slerp
 
+GAUSSIAN_PARAMETERS = ("means", "quats", "scales", "opacities", "features_dc", "features_rest")
 
 class SMPLTrack(nn.Module):
     def __init__(self, track, body, scene_from_world, time_offset, feature_dim, opacity, optimize):

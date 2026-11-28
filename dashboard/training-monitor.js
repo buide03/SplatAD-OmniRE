@@ -7,9 +7,6 @@
     ["smpl_root_rotation", "Gradient · xoay gốc SMPL"],
     ["smpl_body_rotation", "Gradient · xoay khớp SMPL"],
     ["smpl_gaussians", "Gradient · Gaussian SMPL"],
-    ["deformable_network", "Gradient · MLP biến dạng"],
-    ["deformable_embedding", "Gradient · embedding người biến dạng"],
-    ["deformable_gaussians", "Gradient · Gaussian biến dạng"],
     ["trajectory", "Gradient · quỹ đạo hộp"],
     ["background_means", "Gradient · vị trí Gaussian nền"],
   ];

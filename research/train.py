@@ -16,17 +16,16 @@ import yaml
 from nerfstudio.configs.method_configs import method_configs
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackLocation
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
-from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.trainer import Trainer, TrainerConfig
 from nerfstudio.models.splatad import SplatADModelConfig
 from nerfstudio.scripts.train import main as launch
 
 from .colab import complete_checkpoint
-from .deformable import GAUSSIAN_PARAMETERS
 from .model import POSE_GROUPS, VARIANTS, PedestrianModelConfig
 from .pose_monitor import POSE_ATTRS, PoseMonitor, drift, finite_number, gradient_stats
 from .prepare import dump_json, read_json, sha256
 from .quality import QualityHistory
+from .smpl_nodes import GAUSSIAN_PARAMETERS
 
 
 def append_jsonl(path, row):
@@ -181,12 +180,6 @@ class ResearchTrainer(Trainer):
             row["gradients"]["smpl_gaussians"] = gradient_stats(
                 [p for tag, group in groups.items() if tag.startswith("smpl_") and tag not in POSE_GROUPS for p in group]
             )
-            for tag in ("deformable_network", "deformable_embedding"):
-                if tag in groups:
-                    row["gradients"][tag] = gradient_stats(groups[tag])
-            row["gradients"]["deformable_gaussians"] = gradient_stats(
-                [p for tag, group in groups.items() if tag.startswith("deformable_")
-                 and tag not in ("deformable_network", "deformable_embedding") for p in group])
             row["gradients"]["trajectory"] = gradient_stats(groups.get("trajectory_opt", []))
             row["gradients"]["background_means"] = gradient_stats(groups.get("means", []))
             row["pose"] = {}
@@ -345,7 +338,6 @@ def make_config(args):
         )
         # R2 and R3 keep SplatAD's MCMC bank and actor flipping; only pedestrians leave the bank.
         if args.variant == "R3":
-            config.pipeline.model.deform_start = args.deform_start
             config.pipeline.model.smpl_follow_box = args.smpl_follow_box
             if args.ground:
                 config.pipeline.model.ground_path = args.ground.resolve()
@@ -367,15 +359,6 @@ def make_config(args):
             config.optimizers[f"smpl_{name}"] = copy.deepcopy(config.optimizers[name])
         for name, lr in zip(POSE_GROUPS, (3e-4, 2e-4, 2e-4), strict=True):
             config.optimizers[name] = {"optimizer": AdamOptimizerConfig(lr=lr), "scheduler": None}
-    if args.variant == "R3":
-        for name in GAUSSIAN_PARAMETERS:
-            config.optimizers[f"deformable_{name}"] = copy.deepcopy(config.optimizers[name])
-        # DriveStudio configs/omnire.yaml: DeformableNodes embedding and deform_network.
-        for name, lr in (("deformable_embedding", 1e-3), ("deformable_network", 1.6e-3)):
-            config.optimizers[name] = {
-                "optimizer": AdamOptimizerConfig(lr=lr, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(lr_final=lr / 10, max_steps=args.schedule_steps),
-            }
     return config
 
 
@@ -389,11 +372,9 @@ def main():
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--ground", type=Path, help="R3 local road planes written by research.ground")
     parser.add_argument("--deform-seed", type=Path,
-                        help="R3 dataset seed for deformable pedestrians written by research.deform_seed")
+                        help="R3 dataset points that colour far walkers, written by research.deform_seed")
     parser.add_argument("--smpl-follow-box", action=argparse.BooleanOptionalAction, default=True,
                         help="R3: express SMPL roots in their learned cuboid (use --no-smpl-follow-box to ablate)")
-    parser.add_argument("--deform-start", type=int, default=3000,
-                        help="R3 steps before OmniRe deformation of moving non-SMPL pedestrians")
     parser.add_argument("--output", type=Path, default=Path("runs"))
     parser.add_argument("--run-id", default="{timestamp}")
     parser.add_argument("--steps", type=int, default=200, help="Number of iterations to execute in this session")
@@ -424,8 +405,6 @@ def main():
         parser.error("The pose monitor interval must be nonnegative")
     if args.quality_every is not None and args.quality_every < 0:
         parser.error("The RGB quality interval must be nonnegative")
-    if args.deform_start < 0:
-        parser.error("--deform-start must be nonnegative")
     if args.ground and (args.resume or args.variant != "R3"):
         parser.error("--ground applies to a new R3 run. Resume reuses the saved configuration.")
     if args.deform_seed and (args.resume or args.variant != "R3"):
