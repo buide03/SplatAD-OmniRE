@@ -294,7 +294,7 @@ def swing_hips(body, scale):
     body = body.clone()
     for row in HIP_ROWS:
         mean = mean_quat(body[:, row], body[:1, row]).expand_as(body[:, row])
-        body[:, row] = slerp(mean, body[:, row], torch.tensor(float(scale)))
+        body[:, row] = slerp(mean, body[:, row], body.new_tensor(float(scale)))
     return body
 
 
