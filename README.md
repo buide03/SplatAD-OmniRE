@@ -194,6 +194,7 @@ Các lệnh riêng có thể chạy từ root repo sau khi kích hoạt `.deps/t
 ```bash
 python -m research.train --help
 python -m research.probe --help
+python -m research.deform_probe --help  # R3: MLP biến dạng có làm người xa cử động không
 python -m research.evaluate --help
 python -m research.replay --help
 python -m research.compare --help

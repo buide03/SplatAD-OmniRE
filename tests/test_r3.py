@@ -437,3 +437,44 @@ def test_r3_keeps_splatad_seed_when_the_dataset_has_too_few_points(pedestrian_mo
     route = model.actor_routes[2]
     assert route["seed"] == "splatad" and route["gaussians"] == 2
     torch.testing.assert_close(model.deformable_people[0].means, model.native_gaussians["means"][[4, 5]])
+
+
+def test_deform_probe_tells_a_walking_mlp_from_a_static_one(pedestrian_model_class, monkeypatch):
+    from research.deform_probe import deformation_stats, gaussian_stats, summary, verdict
+
+    points, colors, source = dataset_seed(100, 70)
+    points[:, 2] *= 2  # Spread over the box height so the lowest part counts as legs.
+    model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": (points, colors, source)})
+    node = model.deformable_people[0]
+    field = model.deformation_field
+    for layer in (field.position_delta, field.rotation_delta):
+        torch.nn.init.zeros_(layer.weight)
+        torch.nn.init.zeros_(layer.bias)
+    static = deformation_stats(model, node)
+    assert static["measured"] and static["frames"] == 11 and static["leg_gaussians"] > 0
+    assert static["temporal_std_cm"]["p90"] == 0 and not static["walks"]
+
+    class Swing(torch.nn.Module):
+        """Legs swing 20 cm forward and back over the sequence; the body stays put."""
+        def forward(self, centers, time, embedding):
+            legs = (centers[:, 2:] < -0.3).float()
+            delta = torch.zeros_like(centers)
+            delta[:, :1] = 0.2 * torch.sin(2 * torch.pi * 2 * time) * legs
+            return delta, torch.zeros(len(centers), 4)
+
+    model.deformation_field = Swing()
+    walking = deformation_stats(model, node)
+    assert walking["walks"] and walking["leg_temporal_std_cm"]["p90"] > 10
+    assert walking["temporal_std_cm"]["p10"] == 0  # The torso does not move.
+
+    gaussians = gaussian_stats(node)
+    assert gaussians["gaussians"] == 100 and gaussians["visible"] == 100
+    person = {"uuid": "walker", "route": model.actor_routes[2], "gaussians": gaussians, "deformation": static,
+              "observations": {"bbox_height_px": {"p50": 30.0}},
+              "view": {"crop_fraction": 0.0004, "mlp_pixel_change": 0.0, "crop_psnr_db": 20.0,
+                       "crop_psnr_without_mlp_db": 20.0}}
+    person["verdict"] = verdict(person)
+    assert person["verdict"] == ["offsets_static_over_time", "tiny_in_image", "mlp_barely_changes_pixels",
+                                 "few_visible_gaussians"]
+    report = {"step": 9999, "deform_start": 100, "mlp_active": True, "deformable": [person]}
+    assert "offsets_static_over_time" in summary(report)
