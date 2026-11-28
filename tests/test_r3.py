@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from research.far_fit import FarFit, choose_phase
-from research.gait import average_cycle, gait_cycle, local_mesh, sample_cycle
+from research.gait import average_cycle, gait_cycle, local_mesh, sample_cycle, stature, stature_betas
 from research.ground import fit_road_plane
 from research.pose_constraints import PoseConstraints
 from research.smpl_nodes import SMPLTrack
@@ -635,6 +635,25 @@ def test_r3_adds_keypoint_and_lidar_terms_for_far_walkers(pedestrian_model_class
     walker = model.people[1]
     assert walker.body.grad is not None and walker.translation.grad.abs().sum() > 0
     assert model.people[0].body.grad is None
+
+
+def test_far_walker_body_is_as_tall_as_its_box():
+    """The first shape coefficient stretches a y-up stick figure (SMPL's rest axis); the box picks its value."""
+    joints = chain_body().vertices[:, [1, 2, 0]]  # z-up figure turned to y-up, soles at y = 0.02
+    shapes = torch.zeros(24, 3, 10)
+    shapes[:, 1, 0] = -0.05 * joints[:, 1]  # each +1 shrinks the figure by 5 %
+    regressor = torch.eye(24)
+    body = SimpleNamespace(vertices=joints, shapes=shapes, regressor=regressor)
+    assert stature(body, torch.zeros(10)) == pytest.approx(1.63, abs=1e-4)
+    for height in (1.5, 1.63, 1.75):
+        betas = stature_betas(body, height)
+        assert stature(body, betas) == pytest.approx(height, abs=1e-3)
+        assert torch.count_nonzero(betas[1:]) == 0
+    # A loose 2.4 m box gives the tallest adult the shape range allows, not a stretched giant.
+    assert stature(body, stature_betas(body, 2.4)) == pytest.approx(1.63 * 1.15, abs=1e-3)
+    assert float(stature_betas(body, 2.4)[0]) == -3.0
+    # A body without blend shapes keeps its template.
+    assert torch.count_nonzero(stature_betas(chain_body(), 1.8)) == 0
 
 
 def test_far_walker_stands_on_its_cuboid_floor(pedestrian_model_class, monkeypatch):

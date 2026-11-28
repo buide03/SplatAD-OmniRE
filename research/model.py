@@ -9,7 +9,7 @@ from torch import nn
 from nerfstudio.models.splatad import SplatADModel, SplatADModelConfig
 
 from .far_fit import FarFit, choose_phase
-from .gait import average_cycle, floor_planes, gait_cycle, library_cycle, paint, save_cycle
+from .gait import average_cycle, floor_planes, gait_cycle, library_cycle, paint, save_cycle, stature_betas
 from .geometry import BodyModel
 from .pose_constraints import PoseConstraints
 from .prepare import PEDESTRIANS, read_json, sha256, validate_tracks
@@ -297,7 +297,8 @@ class PedestrianModel(SplatADModel):
             box_at = self.box_reader(index)
             rotations, centers = (value.detach().float() for value in box_at(times))
             height = float(self.dynamic_actors.actor_sizes[index][2])
-            track = {"uuid": uuid, "betas": [0.0] * 10, "frames": [
+            betas = stature_betas(body, height)
+            track = {"uuid": uuid, "betas": betas.tolist(), "frames": [
                 {"valid": True, "frame_idx": int(f), "timestamp_s": float(t), "root_translation": [0.0, 0.0, 0.0],
                  "root_quat_wxyz": identity, "body_quats_wxyz": [identity] * 23}
                 for f, t in zip(frame_ids, times)]}
@@ -317,6 +318,7 @@ class PedestrianModel(SplatADModel):
                 route.update(ground="cuboid_floor", stance_frames=int(person.constraints.contact.any(dim=-1).sum()))
             route["rigid_gaussians_replaced"] = route["gaussians"]
             route.update(representation="smpl_gait", gaussians=len(person.means), follows_box=True,
+                         box_height_m=round(height, 3), shape_beta0=round(float(betas[0]), 3),
                          travel_m=round(travel, 2), gait_source=cycle["source"], gait_donors=cycle["donors"],
                          gait_period_s=round(cycle["period_s"], 3), gait_closing_deg=cycle["closing_deg"],
                          gait_swing_deg=cycle["swing_deg"], **decided)

@@ -11,7 +11,9 @@ gets the skeleton and skinning of SMPL, with the pose initialized from the scene
   box stops; research.far_fit picks the starting phase that best explains the walker's 2D
   keypoints and LiDAR returns;
 * the cycle is turned about the box's vertical axis to the walker's own direction, the pelvis is
-  centred in the box and the stance foot stands on the box floor.
+  centred in the box and the stance foot stands on the box floor;
+* the body is as tall as its box: the first SMPL shape coefficient is set to match the box height
+  (clamped to 1.45-1.95 m).
 
 Afterwards the pose trains like any other R3 SMPL track (per-frame refinement, smoothing, box), plus
 the keypoint and LiDAR terms of research.far_fit.
@@ -30,6 +32,44 @@ MIN_PERIOD_S, MAX_PERIOD_S = 0.6, 1.6
 MIN_SWING_DEG = 5.0  # A donor cycle whose legs move less than this is not a walk.
 CADENCE_RANGE = (0.5, 1.5)
 COLOUR_RADIUS_M = 0.15
+STATURE_RANGE_M = (1.45, 1.95)  # Adult statures; a box outside this is more likely loose than the person.
+SHAPE_LIMIT = 3.0  # SMPL shape coefficients are in standard deviations of its training bodies.
+
+
+def stature(body, betas):
+    """Head-to-sole extent of the rest mesh along the body's own up axis (ankles to head joint)."""
+    shaped = body.vertices + body.shapes @ betas
+    joints = body.regressor @ shaped
+    up = F.normalize(joints[15] - (joints[7] + joints[8]) / 2, dim=0)
+    height = shaped @ up
+    return float(height.max() - height.min())
+
+
+def stature_betas(body, height):
+    """SMPL shape whose stature matches a far walker's box height, through the first shape component.
+
+    That component mostly scales stature. Its value is found by bisection within +-3 standard deviations,
+    so an implausible target ends at the limit instead of a distorted body. Bodies without shape blend
+    shapes keep their template.
+    """
+    betas = torch.zeros(10)
+    if getattr(body, "shapes", None) is None:
+        return betas
+    target = min(max(float(height), STATURE_RANGE_M[0]), STATURE_RANGE_M[1])
+    at = lambda value: stature(body, torch.tensor([value] + [0.0] * 9))
+    low, high = -SHAPE_LIMIT, SHAPE_LIMIT
+    if at(low) > at(high):
+        low, high = high, low
+    if target <= at(low):
+        betas[0] = low
+    elif target >= at(high):
+        betas[0] = high
+    else:
+        for _ in range(40):
+            middle = (low + high) / 2
+            low, high = (middle, high) if at(middle) < target else (low, middle)
+        betas[0] = (low + high) / 2
+    return betas
 
 
 def quat_angle(a, b):
