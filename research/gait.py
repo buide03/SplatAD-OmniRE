@@ -12,6 +12,8 @@ gets the skeleton and skinning of SMPL, with the pose initialized from the scene
   keypoints and LiDAR returns;
 * the cycle is turned about the box's vertical axis to the walker's own direction, the pelvis is
   centred in the box and the stance foot stands on the box floor;
+* the hip swing is scaled until the stance foot stays put at the box's speed: 4D-Humans and the
+  averaging of several donors both damp the swing, leaving feet that slide with the box;
 * the body is as tall as its box: the first SMPL shape coefficient is set to match the box height
   (clamped to 1.45-1.95 m).
 
@@ -32,6 +34,10 @@ MIN_PERIOD_S, MAX_PERIOD_S = 0.6, 1.6
 MIN_SWING_DEG = 5.0  # A donor cycle whose legs move less than this is not a walk.
 CADENCE_RANGE = (0.5, 1.5)
 COLOUR_RADIUS_M = 0.15
+HIP_ROWS = (0, 1)  # Body rows of the left/right hip.
+ANKLES = (7, 8)  # SMPL joints of the left/right ankle.
+LEG_SCALES = tuple(0.5 + 0.25 * k for k in range(15))  # 0.5x to 4x the donor hip swing.
+MAX_HIP_SWING_DEG = 35.0  # Hip flexion/extension about its mean stays within a human walk.
 STATURE_RANGE_M = (1.45, 1.95)  # Adult statures; a box outside this is more likely loose than the person.
 SHAPE_LIMIT = 3.0  # SMPL shape coefficients are in standard deviations of its training bodies.
 
@@ -265,6 +271,39 @@ def local_mesh(person, root, body, translation, points=None):
     return apply(blend(person.weights, transform), person.vertices if points is None else points)
 
 
+def local_joints(person, root, body, translation):
+    """The 24 SMPL joints [T, 24, 3] in the box frame, before the box transform."""
+    rotations = quat_matrix(torch.cat((root[..., None, :], body), dim=-2))
+    return apply(joint_transforms(rotations, person.joints, person.parents)[..., :3, :], person.joints) + translation[..., None, :]
+
+
+def foot_slip(person, root, body, translation, times, rotations, positions):
+    """Median scene-frame speed (m/s) of the slower ankle between consecutive poses: the stance foot's slide."""
+    ankles = local_joints(person, root, body, translation)[:, list(ANKLES)]
+    world = ankles @ rotations.transpose(-1, -2) + positions[:, None]
+    seconds = times[1:] - times[:-1]
+    keep = (seconds > 0) & (seconds <= 0.2)
+    if not keep.any():
+        return 0.0
+    speed = (world[1:] - world[:-1]).norm(dim=-1).amin(-1) / seconds.clamp_min(1e-6)
+    return float(speed[keep].median())
+
+
+def swing_hips(body, scale):
+    """Hip rotations moved ``scale`` times as far from their cycle mean (1 keeps them)."""
+    body = body.clone()
+    for row in HIP_ROWS:
+        mean = mean_quat(body[:, row], body[:1, row]).expand_as(body[:, row])
+        body[:, row] = slerp(mean, body[:, row], torch.tensor(float(scale)))
+    return body
+
+
+def hip_swing_deg(body):
+    """Largest hip rotation away from its cycle mean, in degrees."""
+    return max(math.degrees(float(quat_angle(mean_quat(body[:, row], body[:1, row]), body[:, row]).max()))
+               for row in HIP_ROWS)
+
+
 @torch.no_grad()
 def gait_poses(cycle, person, times, rotations, positions, height, phase=0.0):
     """Local root, body and translation of a far walker at its box times, and what was decided.
@@ -288,10 +327,17 @@ def gait_poses(cycle, person, times, rotations, positions, height, phase=0.0):
     pelvis = person.joints[0]
     root, translation = turned(root, translation, pelvis, turn)
     translation[:, :2] -= (pelvis[:2] + translation[:, :2]).mean(0)
+    slip = lambda legs: foot_slip(person, root, legs, translation, times, rotations, positions)
+    before, swing = slip(body), hip_swing_deg(body)
+    scales = [k for k in LEG_SCALES if k * swing <= MAX_HIP_SWING_DEG] or [1.0]
+    scale = min(scales, key=lambda k: slip(swing_hips(body, k)))
+    body = swing_hips(body, scale)
     floor = local_mesh(person, root, body, translation)[..., 2].amin(-1).median()
     translation[:, 2] += -height / 2 - floor
     decided = {"gait_phase": round(float(phase) % 1.0, 3), "gait_stride_m": round(stride, 3), "gait_cadence_hz": round(speed / stride, 3) if speed > 0 else 0.0,
-               "gait_turn_deg": round(math.degrees(turn), 1), "gait_speed_mps": round(speed, 3)}
+               "gait_turn_deg": round(math.degrees(turn), 1), "gait_speed_mps": round(speed, 3),
+               "gait_hip_scale": scale, "gait_hip_swing_deg": round(scale * swing, 1),
+               "foot_slip_before_mps": round(before, 3), "foot_slip_mps": round(slip(body), 3)}
     return root, body, translation, decided
 
 

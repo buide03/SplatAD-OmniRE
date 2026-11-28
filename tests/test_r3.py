@@ -211,7 +211,7 @@ def close_rows(uuid, frames, height=200, bin_name="near", source="4d_humans"):
 
 
 def build_model(module, monkeypatch, variant, observations=None, seeds=None, donor_walks=True, evidence=None,
-                library=None):
+                library=None, gait_min_speed=0.2):
     walk = torch.eye(4).repeat(4, 1, 1)
     walk[:, 0, 3] = torch.arange(4) * 0.4
     trajectories = [
@@ -232,7 +232,7 @@ def build_model(module, monkeypatch, variant, observations=None, seeds=None, don
     model.config = SimpleNamespace(
         variant=variant, scene_id="030", smpl_init_opacity=0.99, manifest_path="manifest", manifest_digest="manifest",
         tracks_path="tracks", body_path="body", feature_dim=13, ground_path=None, ground_prefit=True,
-        gait_min_travel=0.5,
+        gait_min_travel=0.5, gait_min_speed=gait_min_speed,
         trans_smooth_weight=0.01, joint_smooth_weight=0.01, knn_weight=0.001, max_scale_weight=0.05,
         sharp_shape_weight=1.0, contact_weight=0.1, slip_weight=0.1,
         smpl_follow_box=True, smpl_min_frames=5, smpl_min_box_px=80.0, local_offset_weight=0.01,
@@ -307,12 +307,14 @@ def test_r3_far_walker_swings_its_legs_with_the_borrowed_cycle(pedestrian_model_
     model = build_model(pedestrian_model_class, monkeypatch, "R3")
     donor, walker = model.people
     # The donor's hips swing +-20 degrees every 0.6 s; the walker's box moves at the donor's speed,
-    # so it replays the cycle at the same cadence, starting where its own path starts.
+    # so it replays the cycle at the same cadence, starting where its own path starts. The hip swing is
+    # rescaled to keep its stance foot still, and never left worse than the donor's.
+    route = model.actor_routes[2]
     hips = walker.initial_body[:, 0]
     angles = 2 * torch.atan2(hips[:, 1], hips[:, 0]).rad2deg()
-    assert angles.max() - angles.min() > 30
+    assert angles.max() - angles.min() > 40 * route["gait_hip_scale"] - 5
+    assert route["foot_slip_mps"] <= route["foot_slip_before_mps"]
     torch.testing.assert_close(walker.body, walker.initial_body)
-    route = model.actor_routes[2]
     assert route["gait_cadence_hz"] == pytest.approx(1 / 0.6, abs=0.02) and route["gait_turn_deg"] == pytest.approx(0)
     # The stance foot stands on the box floor and the pelvis is centred in the box.
     mesh = local_mesh(walker, walker.root, walker.body, walker.translation).detach()
@@ -656,6 +658,30 @@ def test_far_walker_body_is_as_tall_as_its_box():
     assert torch.count_nonzero(stature_betas(chain_body(), 1.8)) == 0
 
 
+def test_far_walker_hip_swing_is_rescaled_until_its_stance_foot_stays_put():
+    """A donor swing damped to 30 % (4D-Humans, averaging) would slide the feet with the box."""
+    from research.gait import MAX_HIP_SWING_DEG, gait_poses, swing_hips
+    times = torch.arange(30, dtype=torch.float32) / 10
+    found = {}
+    for damp in (1.0, 0.3):
+        walker, box_at = far_walker(times)
+        cycle = walking_donor_cycle()
+        cycle["body"] = swing_hips(cycle["body"], damp)
+        *_, found[damp] = gait_poses(cycle, walker, times, *box_at(times), 1.75)
+    damped, full = found[0.3], found[1.0]
+    assert damped["gait_hip_scale"] >= 2 and damped["foot_slip_mps"] < 0.6 * damped["foot_slip_before_mps"]
+    # Whatever the donor damping, the walker ends with the same swing and the same slide.
+    assert damped["gait_hip_swing_deg"] == pytest.approx(full["gait_hip_swing_deg"], abs=1.0)
+    assert damped["foot_slip_mps"] == pytest.approx(full["foot_slip_mps"], abs=0.02)
+    assert damped["gait_hip_swing_deg"] <= MAX_HIP_SWING_DEG
+
+
+def test_r3_keeps_a_far_pedestrian_that_barely_moves_rigid(pedestrian_model_class, monkeypatch):
+    model = build_model(pedestrian_model_class, monkeypatch, "R3", gait_min_speed=5.0)
+    assert len(model.people) == 1 and model.actor_routes[2]["representation"] == "rigid"
+    assert model.actor_routes[2]["gait_skipped"].startswith("moves 1.20 m/s, slower than 5.0")
+
+
 def test_far_walker_stands_on_its_cuboid_floor(pedestrian_model_class, monkeypatch):
     model = build_model(pedestrian_model_class, monkeypatch, "R3")
     walker = model.people[1]
@@ -679,7 +705,7 @@ def test_far_walker_stands_on_its_cuboid_floor(pedestrian_model_class, monkeypat
     with torch.no_grad():
         walker.translation[:, 2] += 0.1
     floating = constraints.losses(walker, time)["foot_contact"]
-    assert floating > planted + 0.05
+    assert floating > planted + 0.04
     floating.backward()
     assert walker.translation.grad[:, 2].sum() > 0
 

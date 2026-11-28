@@ -35,6 +35,9 @@ class PedestrianModelConfig(SplatADModelConfig):
     # R3 only. Regularizer defaults follow DriveStudio configs/omnire.yaml.
     gait_min_travel: float = 0.5
     """Minimum summed cuboid travel in meters for a far walker (OmniRe traj_length_thres)."""
+    gait_min_speed: float = 0.2
+    """Minimum mean cuboid speed (m/s) for a far walker. Slower boxes are a standing person whose
+    annotation jitters; a walk cycle would shuffle its legs, so it stays a rigid actor as in R2."""
     deform_seed_path: Path | None = None
     """Box-frame LiDAR returns and fill points coloured by the cameras, written by research.deform_seed.
     The aggregate colours the SMPL Gaussians of far walkers; per-frame returns feed the LiDAR term."""
@@ -288,6 +291,10 @@ class PedestrianModel(SplatADModel):
             route = self.actor_routes[index]
             frame_ids = present[:, index].nonzero().flatten()
             if travel < cfg.gait_min_travel or len(frame_ids) < 2:
+                continue
+            seconds = float(all_times[frame_ids[-1]] - all_times[frame_ids[0]])
+            if travel < cfg.gait_min_speed * seconds:
+                route["gait_skipped"] = f"moves {travel / seconds:.2f} m/s, slower than {cfg.gait_min_speed} m/s"
                 continue
             if cycle is None:
                 route["gait_skipped"] = "no near SMPL walker with a closed leg cycle and no gait library"
