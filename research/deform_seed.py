@@ -1,4 +1,4 @@
-"""Seed R3 deformable pedestrians from PandaSet: LiDAR returns and camera colours in the cuboid frame.
+"""Dataset points of R3 far walkers: LiDAR returns and camera colours in the cuboid frame.
 
 SplatAD seeds every actor with 500 random points in its box plus the LiDAR returns inside it, mirrors
 and duplicates them, and colours all of them at random because PandaSet LiDAR has no RGB. For a far
@@ -11,8 +11,9 @@ cuboid frame SplatAD also uses (PandaSet yaw rotation, dimensions x, y, z):
   LiDAR return of the same person falls in the same image cell at about the same depth, and nothing
   closer covers it. Their colour is the median over those views.
 
-The model reads the result with ``--deform-seed`` and replaces the bank rows of each deformable
-pedestrian that has enough points. Others keep SplatAD's seed.
+The file also keeps every frame's own returns in that frame's cuboid frame. The aggregate colours the
+SMPL Gaussians of each far walker; the per-frame returns pull its posed mesh in research.far_fit.
+The model reads both with ``--deform-seed``.
 """
 
 import argparse
@@ -23,7 +24,7 @@ import numpy as np
 
 from .prepare import CAMERAS, PEDESTRIANS, camera_at, read_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CELL_PX = 8
 OCCLUSION_M = 0.3
 BODY_DEPTH_M = (-0.2, 0.8)
@@ -129,6 +130,7 @@ def build_seed(raw, scene_id, cameras=CAMERAS, target=2000, max_points=5000, can
     fill = {uuid: cylinder(candidates * target, size, generator) for uuid, size in sizes.items()}
     fill_seen = {uuid: ([], []) for uuid in sizes}
     lidar = {uuid: ([], []) for uuid in sizes}  # box-frame points and their colour observations
+    per_frame = {uuid: [] for uuid in sizes}  # (frame, box-frame returns of that frame)
     for frame, frame_boxes in enumerate(boxes):
         if not frame_boxes:
             continue
@@ -158,6 +160,7 @@ def build_seed(raw, scene_id, cameras=CAMERAS, target=2000, max_points=5000, can
             colour = median_by(np.concatenate(colour_owner), np.concatenate(colour_value).astype(np.float64), len(hits))
             lidar[uuid][0].append(local)
             lidar[uuid][1].append(colour)
+            per_frame[uuid].append((frame, local.astype(np.float32)))
             # Fill candidates placed with this frame's cuboid.
             points = fill[uuid] @ rotation.T + center
             for view, surface in zip(views, person_depth):
@@ -198,32 +201,59 @@ def build_seed(raw, scene_id, cameras=CAMERAS, target=2000, max_points=5000, can
                        "size_m": [round(float(v), 3) for v in sizes[uuid]]}
     meta = {"schema_version": SCHEMA_VERSION, "scene_id": str(scene_id), "cameras": list(cameras),
             "target": target, "max_points": max_points, "min_views": min_views, "frame": "pandaset_cuboid",
+            "lidar_timestamps": [float(t) for t in read_json(scene / "lidar" / "timestamps.json")],
             "pedestrians": stats}
+    meta["per_frame"] = {uuid: [(frame, points) for frame, points in rows if len(points)]
+                         for uuid, rows in per_frame.items()}
     return result, meta
 
 
 def save_seed(path, result, meta):
+    meta = dict(meta)
+    per_frame = meta.pop("per_frame", {})
     uuids = sorted(result)
     owner = np.concatenate([np.full(len(result[u][0]), i, np.int32) for i, u in enumerate(uuids)]) \
         if uuids else np.empty(0, np.int32)
     stack = lambda i, empty: np.concatenate([result[u][i] for u in uuids]) if uuids else empty
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp.npz")
+    rows = [(i, frame, points) for i, u in enumerate(uuids) for frame, points in per_frame.get(u, [])]
+    frame_owner = np.concatenate([np.full(len(p), i, np.int32) for i, _, p in rows]) if rows else np.empty(0, np.int32)
+    frame_index = np.concatenate([np.full(len(p), f, np.int16) for _, f, p in rows]) if rows else np.empty(0, np.int16)
+    frame_points = np.concatenate([p for _, _, p in rows]).astype(np.float32) if rows else np.empty((0, 3), np.float32)
     np.savez_compressed(temporary, uuids=np.array(uuids, dtype=str), owner=owner,
                         points=stack(0, np.empty((0, 3), np.float32)), colors=stack(1, np.empty((0, 3), np.uint8)),
-                        source=stack(2, np.empty(0, np.uint8)), meta=np.array(json.dumps(meta)))
+                        source=stack(2, np.empty(0, np.uint8)), frame_owner=frame_owner, frame_index=frame_index,
+                        frame_points=frame_points, meta=np.array(json.dumps(meta)))
     temporary.replace(path)
+
+
+def _open(data, scene_id):
+    meta = json.loads(str(data["meta"]))
+    if meta["schema_version"] != SCHEMA_VERSION or meta["scene_id"] != str(scene_id):
+        raise ValueError("The far-walker point file was built for another scene or format. Rebuild it.")
+    return meta
 
 
 def load_seed(path, scene_id):
     """uuid -> (box-frame points [N, 3], RGB 0-255 [N, 3], source [N] 0 LiDAR / 1 fill)."""
     with np.load(path, allow_pickle=False) as data:
-        meta = json.loads(str(data["meta"]))
-        if meta["schema_version"] != SCHEMA_VERSION or meta["scene_id"] != str(scene_id):
-            raise ValueError("The deformable seed was built for another scene or format")
+        _open(data, scene_id)
         owner = data["owner"]
         return {str(uuid): (data["points"][owner == i], data["colors"][owner == i], data["source"][owner == i])
                 for i, uuid in enumerate(data["uuids"])}
+
+
+def load_lidar_frames(path, scene_id):
+    """(LiDAR timestamps per frame, uuid -> [(frame, that frame's returns in its cuboid frame [M, 3])])."""
+    with np.load(path, allow_pickle=False) as data:
+        meta = _open(data, scene_id)
+        owner, index, points = data["frame_owner"], data["frame_index"], data["frame_points"]
+        frames = {}
+        for i, uuid in enumerate(data["uuids"]):
+            mine = owner == i
+            frames[str(uuid)] = [(int(f), points[mine & (index == f)]) for f in np.unique(index[mine])]
+        return meta["lidar_timestamps"], frames
 
 
 def main():

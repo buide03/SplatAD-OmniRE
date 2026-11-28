@@ -48,14 +48,20 @@ Ba thay đổi khác ở adapter SMPL của R3:
 
 Bản R3 trước dùng `DeformableNodes` của OmniRe (MLP theo vị trí, thời gian và embedding) cho 9 người xa của cảnh 030 (35–66 m, cao 29–96 px). Kiểm chứng trên checkpoint 10.000 bước cho thấy MLP chỉ dịch chân 1–2,4 cm theo thời gian và tắt MLP đổi PSNR vùng người trong khoảng ±0,8 dB: người xa trượt theo hộp. Loss so màu từng pixel không kéo được chân đi vài chục pixel tới vị trí thật, nên MLP không có tiền nghiệm chuyển động thì dừng ở hình trung bình. OmniRe cũng không có cơ chế riêng cho trường hợp này.
 
-R3 hiện tại thay MLP bằng khung xương:
+R3 hiện tại thay MLP bằng khung xương có dáng đi chuẩn, rồi buộc nó vào bằng chứng của từng khung:
 
-1. Chọn người gần (track SMPL gắn hộp) có chu kỳ chân lặp lại rõ nhất: độ trễ 0,6–1,6 s cho góc hông và gối khớp nhau ở mọi điểm bắt đầu, chân vung ít nhất 5°.
-2. Người xa nhận SMPL dáng trung bình gắn vào hộp của nó. Pha của chu kỳ tăng theo quãng đường hộp đi được, mỗi chu kỳ một sải bước (sải bước co theo chiều cao hộp, nhịp bước giữ trong 0,5–1,5 lần nhịp của người mượn), nên hộp dừng thì chân dừng.
-3. Chu kỳ được xoay quanh trục đứng để hai người cùng đi về phía trước trong hộp của mình. Khung chậu nằm giữa hộp, bàn chân trụ chạm đáy hộp.
-4. Từ đó pose train như mọi track SMPL của R3: tinh chỉnh từng frame, hai loss làm mượt, `local_offset`, quỹ đạo hộp.
+1. **Dáng đi chuẩn của cảnh** (`research/gait.py`). Mỗi người gần (track SMPL gắn hộp) cho một chu kỳ chân lặp lại rõ nhất: độ trễ 0,6–1,6 s cho góc hông và gối khớp nhau ở mọi điểm bắt đầu, chân vung ít nhất 5°. Các chu kỳ được xoay cho cùng đi theo +x, lấy mẫu lại 24 pha, căn pha theo chu kỳ sạch nhất rồi lấy trung bình.
+2. **Gắn vào hộp.** Người xa nhận SMPL dáng trung bình gắn vào hộp của nó. Pha tăng theo quãng đường hộp đi được, mỗi chu kỳ một sải bước (sải bước trên mỗi mét chiều cao hộp lấy từ người gần, nhịp bước giữ trong 0,5–1,5 lần nhịp của họ), nên hộp dừng thì chân dừng. Chu kỳ xoay theo hướng đi của hộp, khung chậu nằm giữa hộp, bàn chân trụ chạm đáy hộp.
+3. **Keypoint 2D** (`research/keypoints.py`). ViTPose (`usyd-community/vitpose-base-simple`, `transformers` 4.53.2) chạy top-down trên bbox của mọi quan sát người đi bộ trong manifest, nới 15% mỗi cạnh, cho 17 keypoint COCO kèm độ tin cậy và camera PandaSet của ảnh đó.
+4. **LiDAR từng khung.** File của `research.deform_seed` (v2) giữ các điểm Pandar64 của từng khung trong cuboid của khung đó, bỏ điểm sát đáy hộp (mặt đường).
+5. **Chọn pha ban đầu** (`research/far_fit.py`). Thử 24 pha, giữ pha cho tổng hai loss dưới đây nhỏ nhất, nên chân nào bước trước khớp với dữ liệu.
+6. **Phạt khi train.** Pose train như mọi track SMPL của R3 (tinh chỉnh từng frame, hai loss làm mượt, `local_offset`, quỹ đạo hộp), cộng:
+   - `r3_keypoint`: 12 khớp SMPL (vai, khuỷu, cổ tay, hông, gối, cổ chân) chiếu bằng camera của từng quan sát, so với keypoint có độ tin cậy ≥ 0,3, sai số tính theo chiều cao bbox;
+   - `r3_lidar_fit`: khoảng cách từ mỗi điểm LiDAR của 4 khung ngẫu nhiên tới tâm Gaussian gần nhất của mesh đã đặt pose, trong hệ cảnh, nên kéo được cả pose lẫn hộp.
 
-`scene_routes.json` ghi `smpl_gait` cho người xa, kèm người cho mượn (`gait_donor`), chu kỳ, sải bước, nhịp bước, góc xoay và tỉ lệ vertex tô được màu từ dữ liệu.
+   Cả hai dùng phạt Geman–McClure r²/(r²+σ²) (σ = 0,1 chiều cao bbox và 0,1 m): bậc hai khi gần đúng, bị chặn khi gặp keypoint trái/phải bị đổi hay điểm của vật che. Khác loss so màu, gradient của hai loss này luôn chỉ về đáp án kể cả khi chân đang lệch nhiều pixel.
+
+`scene_routes.json` ghi `smpl_gait` cho người xa, kèm các người cho mượn (`gait_donors`), chu kỳ, pha đã chọn, sải bước, nhịp bước, góc xoay, số quan sát keypoint, số khung LiDAR, sai số keypoint (px) và loss LiDAR lúc khởi tạo, và tỉ lệ vertex tô được màu từ dữ liệu.
 
 Hai loss làm mượt tính trên vị trí khớp trong hệ cảnh (hộp ∘ pose cục bộ), nên phạt cả rung của hộp lẫn rung của pose. Loss `local_offset` (w 0,01) neo gốc cục bộ quanh vị trí ban đầu trong hộp, để hộp gánh phần di chuyển và hai bậc tự do không bù trừ nhau. Monitor ghi thêm độ lệch của hộp đã học so với nhãn PandaSet. Dùng `--no-smpl-follow-box` để train một bản R3 không gắn hộp làm đối chứng.
 
@@ -69,10 +75,12 @@ Hai loss làm mượt tính trên vị trí khớp trong hệ cảnh (hộp ∘ 
 | `r3_knn` | 0,001 | Gaussian SMPL |
 | `r3_max_scale` | 0,05 | Gaussian SMPL |
 | `r3_sharp_shape` (mỗi 10 bước) | 1 | Gaussian SMPL |
+| `r3_keypoint` (người xa) | 0,05 | pose người xa, quỹ đạo hộp |
+| `r3_lidar_fit` (người xa, 4 khung mỗi bước) | 0,05 | pose và Gaussian người xa, quỹ đạo hộp |
 
 Loss RGB và LiDAR của SplatAD đi tới mọi nhóm: Gaussian nền và xe, Gaussian và pose SMPL của người gần lẫn người xa, quỹ đạo hộp. Tiếp đất theo LiDAR chỉ áp cho người gần có frame mặt đường. `tests/test_r3.py::test_r3_gradients_reach_meshes_poses_and_box` kiểm tra ma trận này.
 
-Trọng số theo [configs/omnire.yaml](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/configs/omnire.yaml). OmniRe để `joint_smooth` ở dạng chú thích. R3 bật nó với trọng số đã ghi trong file đó vì R2 bị giật. Với CLI, `--ground` nhận file của `python -m research.ground` và `--deform-seed` nhận file `.npz` của `python -m research.deform_seed` (màu cho người xa). Người xa có dưới 64 điểm trong file giữ màu xám mặc định của SMPL. Dashboard và `training.jsonl` ghi các loss `r3_*`. `scene_routes.json` ghi UUID nào dùng `smpl`, `smpl_gait` hay `rigid`.
+Trọng số theo [configs/omnire.yaml](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/configs/omnire.yaml). OmniRe để `joint_smooth` ở dạng chú thích. R3 bật nó với trọng số đã ghi trong file đó vì R2 bị giật. Với CLI, `--ground` nhận file của `python -m research.ground` `--deform-seed` nhận file `.npz` của `python -m research.deform_seed` (màu và LiDAR từng khung cho người xa) và `--keypoints` nhận file của `python -m research.keypoints`. Trọng số hai loss mới là giá trị khởi đầu, chưa được dò. Người xa có dưới 64 điểm trong file giữ màu xám mặc định của SMPL. Dashboard và `training.jsonl` ghi các loss `r3_*`. `scene_routes.json` ghi UUID nào dùng `smpl`, `smpl_gait` hay `rigid`.
 
 ### Bắt đầu trên Colab
 
@@ -206,6 +214,7 @@ Các lệnh riêng có thể chạy từ root repo sau khi kích hoạt `.deps/t
 ```bash
 python -m research.train --help
 python -m research.probe --help
+python -m research.keypoints --help  # cần transformers==4.53.2 trong train-env
 python -m research.evaluate --help
 python -m research.replay --help
 python -m research.compare --help

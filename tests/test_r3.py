@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from research.gait import gait_cycle, local_mesh, sample_cycle
+from research.far_fit import FarFit, choose_phase
+from research.gait import average_cycle, gait_cycle, local_mesh, sample_cycle
 from research.ground import fit_road_plane
 from research.pose_constraints import PoseConstraints
 from research.smpl_nodes import SMPLTrack
@@ -29,24 +30,46 @@ def toy_body():
                            canonical=lambda _: (vertices, joints, torch.eye(4).repeat(24, 1, 1)))
 
 
-def toy_track(uuid="person", roots=None, frames=11, period=None):
+def toy_track(uuid="person", roots=None, frames=11, period=None, axis="x"):
     roots = roots if roots is not None else [[0.02 * i, 0, 0] for i in range(frames)]
     return {"uuid": uuid, "betas": [0] * 10, "frames": [
         {"valid": True, "frame_idx": i, "timestamp_s": i / 10, "root_translation": root,
-         "root_quat_wxyz": IDENTITY, "body_quats_wxyz": stride_pose(i / 10, period) if period else [IDENTITY] * 23}
+         "root_quat_wxyz": IDENTITY, "body_quats_wxyz": stride_pose(i / 10, period, axis) if period else [IDENTITY] * 23}
         for i, root in enumerate(roots)]}
 
 
-def about_x(degrees):
+def about(degrees, axis="x"):
     half = np.radians(degrees) / 2
-    return [float(np.cos(half)), float(np.sin(half)), 0.0, 0.0]
+    quat = [float(np.cos(half)), 0.0, 0.0, 0.0]
+    quat["xyz".index(axis) + 1] = float(np.sin(half))
+    return quat
 
 
-def stride_pose(time, period):
+def about_x(degrees):
+    return about(degrees, "x")
+
+
+def stride_pose(time, period, axis="x"):
     swing = 20 * np.sin(2 * np.pi * time / period)
     pose = [IDENTITY] * 23
-    pose[0], pose[1], pose[3], pose[4] = about_x(swing), about_x(-swing), about_x(swing / 2), about_x(-swing / 2)
+    pose[0], pose[1] = about(swing, axis), about(-swing, axis)
+    pose[3], pose[4] = about(swing / 2 + 10, axis), about(-swing / 2 + 10, axis)
     return pose
+
+
+SMPL_PARENTS = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21)
+
+
+def chain_body():
+    """A z-up stick figure with SMPL's joint tree; one vertex sits on each joint and follows it."""
+    joints = torch.tensor([
+        [0, 0, .95], [0, .09, .9], [0, -.09, .9], [0, 0, 1.05], [0, .09, .5], [0, -.09, .5], [0, 0, 1.2],
+        [0, .09, .08], [0, -.09, .08], [0, 0, 1.3], [.1, .09, .02], [.1, -.09, .02], [0, 0, 1.5],
+        [0, .08, 1.45], [0, -.08, 1.45], [0, 0, 1.65], [0, .18, 1.45], [0, -.18, 1.45], [0, .2, 1.18],
+        [0, -.2, 1.18], [0, .2, .92], [0, -.2, .92], [0, .2, .85], [0, -.2, .85]])
+    faces = torch.tensor([[1, 4, 7], [2, 5, 8], [16, 18, 20], [17, 19, 21], [0, 3, 6]])
+    return SimpleNamespace(parents=SMPL_PARENTS, faces=faces, weights=torch.eye(24), vertices=joints.clone(),
+                           canonical=lambda _: (joints.clone(), joints.clone(), torch.eye(4).repeat(24, 1, 1)))
 
 
 def test_ground_plane_is_local_and_allows_slopes():
@@ -186,7 +209,7 @@ def close_rows(uuid, frames, height=200, bin_name="near", source="4d_humans"):
              "bbox_height_px": height, "pose_source": source} for f in frames]
 
 
-def build_model(module, monkeypatch, variant, observations=None, seeds=None, donor_walks=True):
+def build_model(module, monkeypatch, variant, observations=None, seeds=None, donor_walks=True, evidence=None):
     walk = torch.eye(4).repeat(4, 1, 1)
     walk[:, 0, 3] = torch.arange(4) * 0.4
     trajectories = [
@@ -211,9 +234,13 @@ def build_model(module, monkeypatch, variant, observations=None, seeds=None, don
         trans_smooth_weight=0.01, joint_smooth_weight=0.01, knn_weight=0.001, max_scale_weight=0.05,
         sharp_shape_weight=1.0, contact_weight=0.1, slip_weight=0.1,
         smpl_follow_box=True, smpl_min_frames=5, smpl_min_box_px=80.0, local_offset_weight=0.01,
-        deform_seed_path=None, deform_seed_digest="", deform_seed_min_points=64, init_scale=0.2)
+        deform_seed_path=None, deform_seed_digest="", deform_seed_min_points=64, init_scale=0.2,
+        keypoints_path=None, keypoints_digest="", keypoint_min_score=0.3, keypoint_weight=0.05,
+        lidar_fit_weight=0.05, lidar_fit_frames=4, gait_phase_steps=24)
     if seeds is not None:
         monkeypatch.setattr(module.PedestrianModel, "deform_seeds", lambda self: seeds)
+    if evidence is not None:
+        monkeypatch.setattr(module.PedestrianModel, "far_evidence", lambda self: evidence)
     model.kwargs = {"metadata": {"trajectories": trajectories, "scene_from_world": torch.eye(4),
                                  "scene_time_offset": 0.0}}
     model.dynamic_actors = Boxes(4)
@@ -246,7 +273,8 @@ def test_r3_moves_only_walking_pedestrians_and_refines_the_rest(pedestrian_model
     assert model.refinement_enabled and len(model.smpl_regularizers) == len(model.people) == 2
     assert model.person_index == {"smpl": 0, "walker": 1}
     route = model.actor_routes[2]
-    assert route["gait_donor"] == "smpl" and route["gait_period_s"] == pytest.approx(0.6)
+    assert route["gait_donors"] == ["smpl"] and route["gait_period_s"] == pytest.approx(0.6)
+    assert route["gait_phase"] == 0 and "keypoint_error_px" not in route  # No evidence, no search.
     assert route["rigid_gaussians_replaced"] == 2 and route["gaussians"] == 6
     model.step = 600
     model.step_post_backward(600)
@@ -300,8 +328,8 @@ def test_gait_cycle_finds_the_period_and_turns_with_the_walker():
     rotations = torch.eye(3).repeat(31, 1, 1)
     positions = torch.zeros(31, 3)
     positions[:, 0] = torch.arange(31) * 0.14  # 1.4 m/s along the box's own x axis
-    cycle = gait_cycle(person, rotations, positions)
-    assert cycle["period_s"] == pytest.approx(1.0) and cycle["stride_m"] == pytest.approx(1.4, abs=0.05)
+    cycle = gait_cycle(person, rotations, positions, height=1.75)
+    assert cycle["period_s"] == pytest.approx(1.0) and cycle["stride_per_height"] == pytest.approx(0.8, abs=0.03)
     assert cycle["closing_deg"] < 1 and cycle["swing_deg"] > 10
     torch.testing.assert_close(cycle["direction"], torch.tensor([1.0, 0.0]))
     # Half a cycle later the legs have swapped.
@@ -309,7 +337,7 @@ def test_gait_cycle_finds_the_period_and_turns_with_the_walker():
     torch.testing.assert_close(body[0, 0], body[1, 1], atol=1e-5, rtol=0)
     # A track that only stands has no cycle to lend.
     standing = SMPLTrack(toy_track(frames=31), toy_body(), torch.eye(4), 0, 13, 0.99, True)
-    assert gait_cycle(standing, rotations, positions) is None
+    assert gait_cycle(standing, rotations, positions, height=1.75) is None
 
 
 def test_r3_without_a_walking_donor_leaves_far_walkers_rigid(pedestrian_model_class, monkeypatch):
@@ -452,3 +480,137 @@ def test_r3_keeps_grey_far_walkers_when_the_dataset_has_too_few_points(pedestria
     model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": dataset_seed(10, 10)})
     assert "colour_seed_points" not in model.actor_routes[2]
     torch.testing.assert_close(model.people[1].features_dc.detach(), torch.full((6, 3), 0.5))
+
+
+def test_mean_cycle_aligns_donors_that_start_at_different_phases_and_directions():
+    rotations = torch.eye(3).repeat(31, 1, 1)
+    forward = torch.zeros(31, 3)
+    forward[:, 0] = torch.arange(31) * 0.14
+    sideways = torch.zeros(31, 3)
+    sideways[:, 1] = torch.arange(31) * 0.14  # This donor walks along its box's +y.
+    early = SMPLTrack(toy_track("early", frames=31, period=1.0), toy_body(), torch.eye(4), 0, 13, 0.99, True)
+    late_track = toy_track("late", frames=31, period=1.0)
+    for i, frame in enumerate(late_track["frames"]):
+        frame["body_quats_wxyz"] = stride_pose(i / 10 + 0.3, 1.0)
+    late = SMPLTrack(late_track, toy_body(), torch.eye(4), 0, 13, 0.99, True)
+    cycles = [gait_cycle(early, rotations, forward, 1.75), gait_cycle(late, rotations, sideways, 1.75)]
+    mean = average_cycle(cycles)
+    assert mean["donors"] == [c["uuid"] for c in sorted(cycles, key=lambda c: c["score"])]
+    torch.testing.assert_close(mean["direction"], torch.tensor([1.0, 0.0]))
+    # Aligned in phase, the average keeps the full swing instead of blurring two offset cycles.
+    phases = torch.arange(24) / 24
+    reference = sample_cycle(cycles[0] if cycles[0]["score"] <= cycles[1]["score"] else cycles[1], phases)[1]
+    hips = 2 * torch.atan2(mean["body"][:, 0, 1], mean["body"][:, 0, 0]).rad2deg()
+    assert hips.max() - hips.min() > 35
+    assert float(quat_angle_deg(mean["body"][:, 0], reference[:, 0]).max()) < 6
+
+
+def quat_angle_deg(a, b):
+    dot = (a * b).sum(-1).abs().clamp(max=1)
+    return torch.rad2deg(2 * dot.acos())
+
+
+def side_camera(origin=(0.0, -10.0, 1.0)):
+    """A pinhole camera looking along world +y: camera x = world x, camera y = world -z."""
+    return {"camera_rotation": [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]],
+            "camera_origin": list(origin), "intrinsics": {"fx": 1000.0, "fy": 1000.0, "cx": 960.0, "cy": 540.0}}
+
+
+def far_walker(times, speed=1.4):
+    """An anchored stick-figure walker whose box slides along x, and that box."""
+    track = toy_track("far", frames=len(times))
+    walker = SMPLTrack(track, chain_body(), torch.eye(4), 0, 13, 0.99, True)
+
+    def box_at(query):
+        query = query.reshape(-1)
+        position = torch.zeros(len(query), 3)
+        position[:, 0] = query * speed
+        return torch.eye(3).repeat(len(query), 1, 1), position
+
+    walker.anchor_to(box_at)
+    return walker, box_at
+
+
+def walking_donor_cycle():
+    donor = SMPLTrack(toy_track("donor", frames=31, period=1.0, axis="y"), chain_body(), torch.eye(4), 0, 13, 0.99, True)
+    positions = torch.zeros(31, 3)
+    positions[:, 0] = torch.arange(31) * 0.14
+    return average_cycle([gait_cycle(donor, torch.eye(3).repeat(31, 1, 1), positions, 1.75)])
+
+
+def evidence_from(walker, times, height=1.75):
+    """Keypoints a side camera would see and the LiDAR returns of each frame, for the walker as posed."""
+    from research.far_fit import COCO_TO_SMPL
+
+    camera = side_camera()
+    rotation = torch.tensor(camera["camera_rotation"])
+    origin = torch.tensor(camera["camera_origin"])
+    joints = walker.joints_at(torch.arange(len(times))).detach()
+    rows, sweeps = [], []
+    for i, time in enumerate(times.tolist()):
+        local = (joints[i] - origin) @ rotation
+        pixel = local[:, :2] / local[:, 2:] * 1000 + torch.tensor([960.0, 540.0])
+        keypoints = torch.zeros(17, 2)
+        for coco, smpl in COCO_TO_SMPL:
+            keypoints[coco] = pixel[smpl]
+        scores = [0.0] * 5 + [0.9] * 12
+        top, bottom = float(pixel[:, 1].min()), float(pixel[:, 1].max())
+        rows.append({"timestamp_s": time, "keypoints_xy": keypoints.tolist(), "scores": scores,
+                     "bbox_xyxy": [0.0, top, 10.0, bottom], **camera})
+        mesh = local_mesh(walker, walker.root[i], walker.body[i], walker.translation[i], walker.means).detach()
+        sweeps.append((i, mesh[mesh[:, 2] > -height / 2 + 0.1]))
+    return rows, sweeps
+
+
+def test_far_fit_finds_the_stride_phase_from_keypoints_and_lidar():
+    times = torch.arange(15, dtype=torch.float32) / 10
+    cycle = walking_donor_cycle()
+    walker, box_at = far_walker(times)
+    rotations, centers = box_at(times)
+    truth = FarFit(walker, [], [], torch.eye(4), 0.0, times.tolist(), 1.75)
+    choose_phase(walker, truth, cycle, times, rotations, centers, 1.75, steps=1)  # phase 0 without evidence
+    from research.gait import gait_poses
+    root, body, shift, _ = gait_poses(cycle, walker, times, rotations, centers, 1.75, phase=0.25)
+    with torch.no_grad():
+        walker.root.copy_(root), walker.body.copy_(body), walker.translation.copy_(shift)
+    rows, sweeps = evidence_from(walker, times)
+
+    fit = FarFit(walker, rows, sweeps, torch.eye(4), 0.0, times.tolist(), 1.75)
+    assert fit.keypoint_observations == 15 and fit.lidar_frames == 15
+    decided = choose_phase(walker, fit, cycle, times, rotations, centers, 1.75, steps=20)
+    assert decided["gait_phase"] == pytest.approx(0.25)
+    assert decided["keypoint_error_px"] == pytest.approx(0, abs=1e-2) and decided["lidar_fit"] < 1e-6
+    torch.testing.assert_close(walker.initial_body, walker.body)
+
+    # Away from the answer both terms are positive and their gradients pull the pose back.
+    with torch.no_grad():
+        walker.body[:, 0] = torch.tensor(about(35, "y"))
+    keypoint, lidar = fit.keypoint_loss(walker), fit.lidar_loss(walker, frames=4)
+    assert keypoint > 0 and lidar > 0
+    (keypoint + lidar).backward()
+    assert walker.body.grad[:, 0].abs().sum() > 0
+    step = walker.body.detach() - 0.05 * walker.body.grad / walker.body.grad.norm()
+    with torch.no_grad():
+        walker.body.copy_(step)
+    assert fit.keypoint_loss(walker) < keypoint
+
+
+def test_r3_adds_keypoint_and_lidar_terms_for_far_walkers(pedestrian_model_class, monkeypatch):
+    camera = side_camera((0.0, -10.0, 0.0))
+    keypoints = {"walker": [{"timestamp_s": 0.5, "keypoints_xy": [[960.0, 540.0]] * 17,
+                             "scores": [0.0] * 5 + [0.9] * 12, "bbox_xyxy": [900.0, 500.0, 1000.0, 600.0],
+                            **camera}]}
+    sweeps = {"walker": [(5, np.array([[0.0, 0.0, 0.1], [0.05, 0.0, 0.3]], np.float32))]}
+    model = build_model(pedestrian_model_class, monkeypatch, "R3",
+                        evidence=(keypoints, sweeps, [i / 10 for i in range(11)]))
+    route = model.actor_routes[2]
+    assert route["keypoint_observations"] == 1 and route["lidar_frames"] == 1
+    assert "keypoint_error_px" in route and "lidar_fit" in route and 0 <= route["gait_phase"] < 1
+    assert list(model.far_fits) == ["1"]  # Only the far walker; the near SMPL track keeps 4D-Humans.
+    model.last_actor_time = torch.tensor(0.5)
+    losses = model.r3_losses()
+    assert {"r3_keypoint", "r3_lidar_fit"} <= set(losses)
+    (losses["r3_keypoint"] + losses["r3_lidar_fit"]).backward()
+    walker = model.people[1]
+    assert walker.body.grad is not None and walker.translation.grad.abs().sum() > 0
+    assert model.people[0].body.grad is None

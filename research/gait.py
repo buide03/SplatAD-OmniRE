@@ -2,16 +2,19 @@
 
 4D-Humans cannot pose a person who is 30-90 px tall, and a free deformation MLP learns no walk from
 such crops (photometric gradients cannot pull a leg several pixels across). A far walker therefore
-gets the skeleton and skinning of SMPL, with the pose initialized from one closed gait cycle of the
-best-observed near walker:
+gets the skeleton and skinning of SMPL, with the pose initialized from the scene's mean gait cycle:
 
-* the cycle is the lag of the near track whose leg joints repeat best (0.6-1.6 s);
-* the phase advances with the distance the far cuboid travels, one cycle per stride (stride scaled
-  by box height, cadence clamped to 0.5-1.5x the donor's), so legs stop when the box stops;
-* the cycle is turned about the box's vertical axis so that both people walk the same way in their
-  own boxes, the pelvis is centred in the box and the stance foot stands on the box floor.
+* each near walker lends the lag of its track whose leg joints repeat best (0.6-1.6 s);
+* the cycles are turned to walk along +x, resampled, aligned in phase and averaged;
+* the phase advances with the distance the far cuboid travels, one cycle per stride (stride per
+  metre of box height from the donors, cadence clamped to 0.5-1.5x theirs), so legs stop when the
+  box stops; research.far_fit picks the starting phase that best explains the walker's 2D
+  keypoints and LiDAR returns;
+* the cycle is turned about the box's vertical axis to the walker's own direction, the pelvis is
+  centred in the box and the stance foot stands on the box floor.
 
-Afterwards the pose trains like any other R3 SMPL track (per-frame refinement, smoothing, box).
+Afterwards the pose trains like any other R3 SMPL track (per-frame refinement, smoothing, box), plus
+the keypoint and LiDAR terms of research.far_fit.
 """
 import math
 
@@ -61,10 +64,11 @@ def path_length(positions, window=5):
 
 
 @torch.no_grad()
-def gait_cycle(person, rotations, positions):
+def gait_cycle(person, rotations, positions, height):
     """The best closed walking cycle of a box-anchored SMPL track, from its initial (4D-Humans) pose.
 
-    ``rotations`` [F, 3, 3] and ``positions`` [F, 3] are the track's anchor box at its pose times.
+    ``rotations`` [F, 3, 3] and ``positions`` [F, 3] are the track's anchor box at its pose times and
+    ``height`` its box height, which turns the stride into a stride per metre of height.
     Returns None when no contiguous run holds a leg cycle between MIN_PERIOD_S and MAX_PERIOD_S.
     """
     times, legs = person.times, person.initial_body[:, LEG_ROWS]
@@ -101,8 +105,60 @@ def gait_cycle(person, rotations, positions):
     return {
         "uuid": person.uuid, "root": person.initial_root[span].clone(), "body": person.initial_body[span].clone(),
         "translation": translation.clone(),
-        "period_s": float(times[first + lag] - times[first]), "stride_m": stride, "direction": direction,
+        "period_s": float(times[first + lag] - times[first]), "stride_per_height": stride / height,
+        "direction": direction, "pelvis": person.joints[0].clone(),
         "closing_deg": round(math.degrees(closing), 2), "swing_deg": round(math.degrees(swing), 2), "score": score,
+    }
+
+
+def spin_about_z(angle, like):
+    return quat_matrix(like.new_tensor([math.cos(angle / 2), 0.0, 0.0, math.sin(angle / 2)]))
+
+
+def turned(root, translation, pelvis, angle):
+    """Turn local poses about the box's vertical axis. Roots pivot about the pelvis, so the offset turns too."""
+    spin = spin_about_z(angle, root)
+    return matrix_quat(spin @ quat_matrix(root)), (pelvis + translation) @ spin.T - pelvis
+
+
+def heading(direction):
+    return math.atan2(float(direction[1]), float(direction[0]))
+
+
+def mean_quat(stack, anchor):
+    """Average of unit quaternions [N, ..., 4] after flipping each to the hemisphere of ``anchor``."""
+    stack = torch.where((stack * anchor).sum(-1, keepdim=True) < 0, -stack, stack)
+    return F.normalize(stack.mean(0), dim=-1)
+
+
+@torch.no_grad()
+def average_cycle(cycles, samples=24):
+    """The scene's mean gait: cycles turned to walk along +x, resampled, aligned in phase, averaged.
+
+    The cleanest cycle (lowest score) is the phase reference; each other cycle is rolled to the
+    shift whose hip and knee rotations match it best.
+    """
+    phases = torch.arange(samples, dtype=torch.float32) / samples
+    ordered = sorted(cycles, key=lambda c: c["score"])
+    aligned = []
+    for cycle in ordered:
+        root, body, translation = sample_cycle(cycle, phases)
+        root, translation = turned(root, translation, cycle["pelvis"], -heading(cycle["direction"]))
+        if aligned:
+            legs, target = body[:, LEG_ROWS], aligned[0][1][:, LEG_ROWS]
+            shift = min(range(samples), key=lambda k: float(quat_angle(legs.roll(-k, 0), target).mean()))
+            root, body, translation = root.roll(-shift, 0), body.roll(-shift, 0), translation.roll(-shift, 0)
+        aligned.append((root, body, translation - translation.mean(0)))
+    first = aligned[0]
+    return {
+        "uuid": "+".join(c["uuid"] for c in ordered), "donors": [c["uuid"] for c in ordered],
+        "root": mean_quat(torch.stack([a[0] for a in aligned]), first[0]),
+        "body": mean_quat(torch.stack([a[1] for a in aligned]), first[1]),
+        "translation": torch.stack([a[2] for a in aligned]).mean(0),
+        "period_s": sum(c["period_s"] for c in ordered) / len(ordered),
+        "stride_per_height": sum(c["stride_per_height"] for c in ordered) / len(ordered),
+        "direction": torch.tensor([1.0, 0.0]), "pelvis": ordered[0]["pelvis"],
+        "closing_deg": max(c["closing_deg"] for c in ordered), "swing_deg": min(c["swing_deg"] for c in ordered),
     }
 
 
@@ -119,18 +175,21 @@ def sample_cycle(cycle, phase):
     return root, body, translation
 
 
-def local_mesh(person, root, body, translation):
-    """SMPL vertices [T, V, 3] in the box frame for local poses, as SMPLTrack before the box transform."""
+def local_mesh(person, root, body, translation, points=None):
+    """SMPL vertices (or ``points`` skinned like them) [T, V, 3] in the box frame, before the box transform."""
     rotations = quat_matrix(torch.cat((root[..., None, :], body), dim=-2))
     transform = joint_transforms(rotations, person.joints, person.parents) @ person.inverse_canonical
     transform = torch.cat((transform[..., :3, :3], transform[..., :3, 3:] + translation[..., None, :, None]), dim=-1)
-    return apply(blend(person.weights, transform), person.vertices)
+    return apply(blend(person.weights, transform), person.vertices if points is None else points)
 
 
 @torch.no_grad()
-def gait_poses(cycle, person, times, rotations, positions, height, donor_height):
-    """Local root, body and translation of a far walker at its box times, and what was decided."""
-    stride = cycle["stride_m"] * height / donor_height
+def gait_poses(cycle, person, times, rotations, positions, height, phase=0.0):
+    """Local root, body and translation of a far walker at its box times, and what was decided.
+
+    ``phase`` (in cycles) is where the walker is in its stride when its box starts moving.
+    """
+    stride = cycle["stride_per_height"] * height
     distance = path_length(positions)
     seconds = float(times[-1] - times[0])
     speed = float(distance[-1]) / seconds if seconds > 0 else 0.0
@@ -139,21 +198,17 @@ def gait_poses(cycle, person, times, rotations, positions, height, donor_height)
         cadence = 1.0 / cycle["period_s"]
         low, high = speed / (CADENCE_RANGE[1] * cadence), speed / (CADENCE_RANGE[0] * cadence)
         stride = min(max(stride, low), high)
-    root, body, translation = sample_cycle(cycle, distance / stride)
+    root, body, translation = sample_cycle(cycle, phase + distance / stride)
     turn = 0.0
     direction = local_direction(rotations, positions)
     if direction is not None:
-        turn = math.atan2(float(direction[1]), float(direction[0])) - math.atan2(
-            float(cycle["direction"][1]), float(cycle["direction"][0]))
-    spin = quat_matrix(root.new_tensor([math.cos(turn / 2), 0.0, 0.0, math.sin(turn / 2)]))
-    root = matrix_quat(spin @ quat_matrix(root))
+        turn = heading(direction) - heading(cycle["direction"])
     pelvis = person.joints[0]
-    # Root rotations pivot about the pelvis, so turning the body turns its offset about the box axis too.
-    translation = (pelvis + translation) @ spin.T - pelvis
+    root, translation = turned(root, translation, pelvis, turn)
     translation[:, :2] -= (pelvis[:2] + translation[:, :2]).mean(0)
     floor = local_mesh(person, root, body, translation)[..., 2].amin(-1).median()
     translation[:, 2] += -height / 2 - floor
-    decided = {"gait_stride_m": round(stride, 3), "gait_cadence_hz": round(speed / stride, 3) if speed > 0 else 0.0,
+    decided = {"gait_phase": round(float(phase) % 1.0, 3), "gait_stride_m": round(stride, 3), "gait_cadence_hz": round(speed / stride, 3) if speed > 0 else 0.0,
                "gait_turn_deg": round(math.degrees(turn), 1), "gait_speed_mps": round(speed, 3)}
     return root, body, translation, decided
 

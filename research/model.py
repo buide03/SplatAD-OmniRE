@@ -8,7 +8,8 @@ from torch import nn
 
 from nerfstudio.models.splatad import SplatADModel, SplatADModelConfig
 
-from .gait import gait_cycle, gait_poses, paint
+from .far_fit import FarFit, choose_phase
+from .gait import average_cycle, gait_cycle, paint
 from .geometry import BodyModel
 from .pose_constraints import PoseConstraints
 from .prepare import PEDESTRIANS, read_json, sha256, validate_tracks
@@ -36,10 +37,22 @@ class PedestrianModelConfig(SplatADModelConfig):
     """Minimum summed cuboid travel in meters for a far walker (OmniRe traj_length_thres)."""
     deform_seed_path: Path | None = None
     """Box-frame LiDAR returns and fill points coloured by the cameras, written by research.deform_seed.
-    They colour the SMPL Gaussians of far walkers."""
+    The aggregate colours the SMPL Gaussians of far walkers; per-frame returns feed the LiDAR term."""
     deform_seed_digest: str = ""
     deform_seed_min_points: int = 64
     """A far walker with fewer dataset points keeps the default grey SMPL colour."""
+    keypoints_path: Path | None = None
+    """ViTPose keypoints of the manifest observations, written by research.keypoints."""
+    keypoints_digest: str = ""
+    keypoint_min_score: float = 0.3
+    keypoint_weight: float = 0.05
+    """Far walkers: Geman-McClure penalty of projected SMPL joints against 2D keypoints (box heights)."""
+    lidar_fit_weight: float = 0.05
+    """Far walkers: Geman-McClure penalty of each frame's LiDAR returns to the posed Gaussians (meters)."""
+    lidar_fit_frames: int = 4
+    """Sweeps per far walker drawn at each step for the LiDAR term."""
+    gait_phase_steps: int = 24
+    """Grid of starting gait phases searched against the keypoints and LiDAR before training."""
     smpl_follow_box: bool = True
     """Express each SMPL root in its learned cuboid frame, so trajectory optimization moves the mesh."""
     smpl_min_frames: int = 5
@@ -66,7 +79,8 @@ class PedestrianModel(SplatADModel):
     Background and vehicles train exactly as in SplatAD, including MCMC and actor flipping, so the
     variants differ only in how pedestrians are initialized and moved. R3 anchors SMPL to the learned
     box, adds OmniRe's SMPL regularizers and LiDAR ground contact, and gives walking pedestrians
-    without a usable 4D-Humans pose an SMPL body driven by a gait cycle borrowed from a near walker.
+    without a usable 4D-Humans pose an SMPL body driven by the scene's mean gait cycle, tied to their
+    2D keypoints and per-frame LiDAR returns.
     """
 
     human_motion = True
@@ -82,6 +96,7 @@ class PedestrianModel(SplatADModel):
         r3 = cfg.variant == "R3"
         super().populate_modules()
         self.people = nn.ModuleList()
+        self.far_fits = nn.ModuleDict()
         self.smpl_regularizers = []
         self.person_index = {}
         self.last_sensor = None
@@ -209,23 +224,43 @@ class PedestrianModel(SplatADModel):
 
         return load_seed(cfg.deform_seed_path, cfg.scene_id)
 
-    def gait_donor(self, trajectories):
-        """The near SMPL walker with the cleanest closed leg cycle, as (cycle, box height) or (None, None)."""
+    def gait_cycle(self, trajectories):
+        """The scene's mean gait from every near SMPL walker with a closed leg cycle, or None."""
         index_of = {t["uuid"]: i for i, t in enumerate(trajectories)}
-        best = None
+        cycles = []
         for person in self.people:
             if person.box_at is None:
                 continue
-            cycle = gait_cycle(person, person.anchor_rotation, person.anchor_position)
-            if cycle is not None and (best is None or cycle["score"] < best[0]["score"]):
-                best = (cycle, float(self.dynamic_actors.actor_sizes[index_of[person.uuid]][2]))
-        return best if best is not None else (None, None)
+            height = float(self.dynamic_actors.actor_sizes[index_of[person.uuid]][2])
+            cycle = gait_cycle(person, person.anchor_rotation, person.anchor_position, height)
+            if cycle is not None:
+                cycles.append(cycle)
+        return average_cycle(cycles) if cycles else None
+
+    def far_evidence(self):
+        """ViTPose keypoints by UUID and (LiDAR timestamps, per-frame returns by UUID), when configured."""
+        cfg = self.config
+        keypoints, sweeps, lidar_times = {}, {}, []
+        if cfg.keypoints_path is not None:
+            if sha256(cfg.keypoints_path) != cfg.keypoints_digest:
+                raise ValueError("The keypoint file changed after the run was configured")
+            from .keypoints import load_keypoints
+
+            for row in load_keypoints(cfg.keypoints_path, cfg.scene_id, cfg.manifest_digest):
+                keypoints.setdefault(row["uuid"], []).append(row)
+        if cfg.deform_seed_path is not None:
+            from .deform_seed import load_lidar_frames
+
+            lidar_times, sweeps = load_lidar_frames(cfg.deform_seed_path, cfg.scene_id)
+        return keypoints, sweeps, lidar_times
 
     def initialize_gait_people(self, trajectories, replaced, body):
-        """Walking pedestrians without a usable 4D-Humans pose: SMPL posed by a borrowed gait cycle."""
+        """Walking pedestrians without a usable 4D-Humans pose: SMPL posed by the scene's mean gait."""
         cfg = self.config
-        cycle, donor_height = self.gait_donor(trajectories)
+        metadata = self.kwargs["metadata"]
+        cycle = self.gait_cycle(trajectories)
         seeds = self.deform_seeds()
+        keypoints, sweeps, lidar_times = self.far_evidence()
         all_times = self.dynamic_actors.unique_timestamps
         _, present = self.dynamic_actors.get_boxes2world(all_times, flatten=False)
         present = present.reshape(len(all_times), -1)
@@ -243,11 +278,12 @@ class PedestrianModel(SplatADModel):
             if cycle is None:
                 route["gait_skipped"] = "no near SMPL walker with a closed leg cycle"
                 continue
+            uuid = trajectory["uuid"]
             times = all_times[frame_ids]
             box_at = self.box_reader(index)
             rotations, centers = (value.detach().float() for value in box_at(times))
             height = float(self.dynamic_actors.actor_sizes[index][2])
-            track = {"uuid": trajectory["uuid"], "betas": [0.0] * 10, "frames": [
+            track = {"uuid": uuid, "betas": [0.0] * 10, "frames": [
                 {"valid": True, "frame_idx": int(f), "timestamp_s": float(t), "root_translation": [0.0, 0.0, 0.0],
                  "root_quat_wxyz": identity, "body_quats_wxyz": [identity] * 23}
                 for f, t in zip(frame_ids, times)]}
@@ -256,22 +292,23 @@ class PedestrianModel(SplatADModel):
                 person = SMPLTrack(track, body, torch.eye(4), 0.0, feature_dim=cfg.feature_dim,
                                    opacity=cfg.smpl_init_opacity, optimize=True)
             person.anchor_to(box_at)
-            root, pose, shift, decided = gait_poses(cycle, person, times, rotations, centers, height, donor_height)
-            with torch.no_grad():
-                for name, value in (("root", root), ("body", pose), ("translation", shift)):
-                    getattr(person, name).copy_(value)
-                    getattr(person, f"initial_{name}").copy_(value)
+            fit = FarFit(person, keypoints.get(uuid, []), sweeps.get(uuid, []), metadata["scene_from_world"],
+                         float(metadata["scene_time_offset"]), lidar_times, height, cfg.keypoint_min_score)
+            decided = choose_phase(person, fit, cycle, times, rotations, centers, height, cfg.gait_phase_steps)
             person.exact_velocity = True
             route["rigid_gaussians_replaced"] = route["gaussians"]
             route.update(representation="smpl_gait", gaussians=len(person.means), follows_box=True,
-                         travel_m=round(travel, 2), gait_donor=cycle["uuid"], gait_period_s=round(cycle["period_s"], 3),
-                         gait_closing_deg=cycle["closing_deg"], gait_swing_deg=cycle["swing_deg"], **decided)
-            dataset = seeds.get(trajectory["uuid"])
+                         travel_m=round(travel, 2), gait_donors=cycle["donors"],
+                         gait_period_s=round(cycle["period_s"], 3), gait_closing_deg=cycle["closing_deg"],
+                         gait_swing_deg=cycle["swing_deg"], **decided)
+            dataset = seeds.get(uuid)
             if dataset is not None and len(dataset[0]) >= cfg.deform_seed_min_points:
                 points, colours, source = dataset
                 route.update(colour_seed_points=len(points), colour_seed_lidar=int((source == 0).sum()),
                              colour_matched=round(paint(person, points, colours, len(times) // 2), 3))
-            self.person_index[trajectory["uuid"]] = len(self.people)
+            self.person_index[uuid] = len(self.people)
+            if fit.keypoint_observations or fit.lidar_frames:
+                self.far_fits[str(len(self.people))] = fit
             self.people.append(person)
             moved.append(index)
         return moved
@@ -324,6 +361,25 @@ class PedestrianModel(SplatADModel):
                         terms[name].append(value)
         losses = {f"r3_{name}": torch.stack(values).mean() * weights[name]
                   for name, values in terms.items() if weights[name]}
+        losses.update(self.far_losses())
+        return losses
+
+    def far_losses(self):
+        """Keypoint and LiDAR terms of the far walkers, each averaged over the walkers that have it."""
+        cfg = self.config
+        keypoint, lidar = [], []
+        for slot, fit in self.far_fits.items():
+            person = self.people[int(slot)]
+            if cfg.keypoint_weight:
+                keypoint.append(fit.keypoint_loss(person))
+            if cfg.lidar_fit_weight:
+                lidar.append(fit.lidar_loss(person, cfg.lidar_fit_frames))
+        losses = {}
+        keypoint, lidar = [v for v in keypoint if v is not None], [v for v in lidar if v is not None]
+        if keypoint:
+            losses["r3_keypoint"] = torch.stack(keypoint).mean() * cfg.keypoint_weight
+        if lidar:
+            losses["r3_lidar_fit"] = torch.stack(lidar).mean() * cfg.lidar_fit_weight
         return losses
 
     def get_param_groups(self):

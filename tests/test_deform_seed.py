@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 from scipy.spatial.transform import Rotation
 
-from research.deform_seed import build_seed, load_seed, save_seed
+from research.deform_seed import build_seed, load_lidar_frames, load_seed, save_seed
 
 FX, CX, CY, WIDTH, HEIGHT = 800.0, 160.0, 120.0, 320, 240
 # Camera at the origin looking along world +x: camera x is world -y, camera y is world -z.
@@ -95,3 +95,16 @@ def test_seed_caps_lidar_and_round_trips(raw, tmp_path):
         np.testing.assert_array_equal(expected, actual)
     with pytest.raises(ValueError, match="another scene"):
         load_seed(path, "011")
+
+
+def test_seed_keeps_each_frames_returns_for_the_lidar_term(raw, tmp_path):
+    result, meta = build_seed(raw, "030", cameras=("front",), target=300, max_points=500)
+    path = tmp_path / "deform-seed.npz"
+    save_seed(path, result, meta)
+    times, frames = load_lidar_frames(path, "030")
+    assert times == [0.0, 0.1]
+    assert [frame for frame, _ in frames["walker"]] == [0, 1]
+    for _, points in frames["walker"]:
+        # Each frame on its own: the 11 x 35 face returns, in that frame's cuboid frame.
+        assert points.shape == (11 * 35, 3)
+        np.testing.assert_allclose(points[:, 0], -0.3, atol=1e-5)
