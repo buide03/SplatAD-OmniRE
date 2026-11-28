@@ -205,7 +205,7 @@ def close_rows(uuid, frames, height=200, bin_name="near", source="4d_humans"):
              "bbox_height_px": height, "pose_source": source} for f in frames]
 
 
-def build_model(module, monkeypatch, variant, observations=None):
+def build_model(module, monkeypatch, variant, observations=None, seeds=None):
     walk = torch.eye(4).repeat(4, 1, 1)
     walk[:, 0, 3] = torch.arange(4) * 0.4
     trajectories = [
@@ -229,7 +229,10 @@ def build_model(module, monkeypatch, variant, observations=None):
         deform_start=100, deform_max_gaussians=5000, deform_min_travel=0.5,
         trans_smooth_weight=0.01, joint_smooth_weight=0.01, knn_weight=0.001, max_scale_weight=0.05,
         sharp_shape_weight=1.0, out_of_bound_weight=1.0, contact_weight=0.1, slip_weight=0.1,
-        smpl_follow_box=True, smpl_min_frames=5, smpl_min_box_px=80.0, local_offset_weight=0.01)
+        smpl_follow_box=True, smpl_min_frames=5, smpl_min_box_px=80.0, local_offset_weight=0.01,
+        deform_seed_path=None, deform_seed_digest="", deform_seed_min_points=64, init_scale=0.2)
+    if seeds is not None:
+        monkeypatch.setattr(module.PedestrianModel, "deform_seeds", lambda self: seeds)
     model.kwargs = {"metadata": {"trajectories": trajectories, "scene_from_world": torch.eye(4),
                                  "scene_time_offset": 0.0}}
     model.dynamic_actors = Boxes(4)
@@ -402,3 +405,35 @@ def test_r3_gradients_reach_mesh_mlp_gaussians_and_box(pedestrian_model_class, m
     assert rows["r3_foot_contact"] == rows["r3_ground_penetration"] == rows["r3_foot_slip"] == motion
     assert rows["r3_knn"] == rows["r3_max_scale"] == rows["r3_sharp_shape"] == {"Gaussian SMPL"}
     assert rows["r3_out_of_bound"] == {"MLP biến dạng"}
+
+
+def dataset_seed(count, lidar):
+    generator = np.random.default_rng(4)
+    points = (generator.random((count, 3)) - 0.5).astype(np.float32) * 0.8
+    colors = np.tile(np.array([[200, 30, 20]], np.uint8), (count, 1))
+    return points, colors, np.r_[np.zeros(lidar, np.uint8), np.ones(count - lidar, np.uint8)]
+
+
+def test_r3_seeds_deformable_pedestrians_from_the_dataset(pedestrian_model_class, monkeypatch):
+    points, colors, source = dataset_seed(100, 70)
+    model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": (points, colors, source)})
+    route = model.actor_routes[2]
+    assert route["representation"] == "deformable" and route["seed"] == "dataset"
+    assert (route["gaussians"], route["seed_lidar"], route["seed_fill"], route["bank_rows_replaced"]) == (100, 70, 30, 2)
+    node = model.deformable_people[0]
+    torch.testing.assert_close(node.means.detach(), torch.from_numpy(points))
+    torch.testing.assert_close(node.features_dc.detach(), torch.tensor([[200., 30., 20.]]).expand(100, 3) / 255)
+    # Same starting opacity as SplatAD's bank, scales from neighbour spacing, unit quaternions.
+    assert torch.equal(node.opacities.detach(), torch.full((100, 1), 4.0))
+    assert node.scales.shape == (100, 3) and torch.isfinite(node.scales).all()
+    torch.testing.assert_close(node.quats.detach().norm(dim=-1), torch.ones(100))
+    assert node.features_rest.shape == (100, 13)
+    # The walker's bank rows still leave the bank.
+    assert torch.equal(model.gauss_params["id"].flatten(), torch.tensor([0., 0., 3., 3., 4., 4.]))
+
+
+def test_r3_keeps_splatad_seed_when_the_dataset_has_too_few_points(pedestrian_model_class, monkeypatch):
+    model = build_model(pedestrian_model_class, monkeypatch, "R3", seeds={"walker": dataset_seed(10, 10)})
+    route = model.actor_routes[2]
+    assert route["seed"] == "splatad" and route["gaussians"] == 2
+    torch.testing.assert_close(model.deformable_people[0].means, model.native_gaussians["means"][[4, 5]])

@@ -11,6 +11,33 @@ from .geometry import matrix_quat, quat_matrix
 GAUSSIAN_PARAMETERS = ("means", "quats", "scales", "opacities", "features_dc", "features_rest")
 
 
+def random_quaternions(count, generator=None):
+    """Uniform random rotations, as SplatAD's random_quat_tensor."""
+    u, v, w = torch.rand(3, count, generator=generator)
+    return torch.stack(((1 - u).sqrt() * torch.sin(2 * torch.pi * v), (1 - u).sqrt() * torch.cos(2 * torch.pi * v),
+                        u.sqrt() * torch.sin(2 * torch.pi * w), u.sqrt() * torch.cos(2 * torch.pi * w)), dim=-1)
+
+
+def seed_gaussians(points, colors, opacity_logit, init_scale, feature_dim, generator=None):
+    """Gaussian rows from box-frame points and RGB 0-255, with SplatAD's create_gauss_param_dict rules:
+    scale from the mean distance to the 3 nearest points, random rotation, colour / 255 as features_dc."""
+    means = torch.as_tensor(points, dtype=torch.float32)
+    count = len(means)
+    if count < 4:
+        spacing = torch.ones(count, 1)
+    else:
+        spacing = torch.cat([torch.cdist(chunk, means).topk(4, largest=False).values[:, 1:].mean(-1, keepdim=True)
+                             for chunk in means.split(1024)])
+    return {
+        "means": means,
+        "quats": random_quaternions(count, generator),
+        "scales": (spacing.clamp_min(1e-4) * init_scale).log().repeat(1, 3),
+        "opacities": torch.full((count, 1), float(opacity_logit)),
+        "features_dc": torch.as_tensor(colors, dtype=torch.float32) / 255,
+        "features_rest": torch.randn(count, feature_dim, generator=generator),
+    }
+
+
 class OmniReDeformationField(nn.Module):
     """OmniRe's ConditionalDeformNetwork (DriveStudio, MIT): D=8, W=256, skip at D/2, 10 frequency bands."""
 

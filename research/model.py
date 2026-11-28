@@ -8,7 +8,7 @@ from torch import nn
 
 from nerfstudio.models.splatad import SplatADModel, SplatADModelConfig
 
-from .deformable import GAUSSIAN_PARAMETERS, DeformablePedestrian, OmniReDeformationField
+from .deformable import GAUSSIAN_PARAMETERS, DeformablePedestrian, OmniReDeformationField, seed_gaussians
 from .geometry import BodyModel
 from .pose_constraints import PoseConstraints
 from .prepare import PEDESTRIANS, read_json, sha256, validate_tracks
@@ -38,6 +38,11 @@ class PedestrianModelConfig(SplatADModelConfig):
     """Gaussians kept per deformable pedestrian (instance_max_pts)."""
     deform_min_travel: float = 0.5
     """Minimum summed cuboid travel in meters for a deformable pedestrian (traj_length_thres)."""
+    deform_seed_path: Path | None = None
+    """Box-frame LiDAR returns and fill points coloured by the cameras, written by research.deform_seed."""
+    deform_seed_digest: str = ""
+    deform_seed_min_points: int = 64
+    """A deformable pedestrian with fewer dataset points keeps SplatAD's seed rows."""
     smpl_follow_box: bool = True
     """Express each SMPL root in its learned cuboid frame, so trajectory optimization moves the mesh."""
     smpl_min_frames: int = 5
@@ -201,10 +206,23 @@ class PedestrianModel(SplatADModel):
             raise ValueError("Ground planes must be generated from this run's manifest")
         return near_frames, ground["planes"]
 
+    def deform_seeds(self):
+        cfg = self.config
+        if cfg.deform_seed_path is None:
+            return {}
+        if sha256(cfg.deform_seed_path) != cfg.deform_seed_digest:
+            raise ValueError("The deformable seed file changed after the run was configured")
+        from .deform_seed import load_seed
+
+        return load_seed(cfg.deform_seed_path, cfg.scene_id)
+
     def initialize_deformable_people(self, trajectories, replaced):
         """OmniRe DeformableNodes: moving pedestrians without a usable SMPL track."""
         cfg = self.config
         ids = self.id.flatten().long()
+        seeds = self.deform_seeds()
+        # Every bank row starts with the same opacity; dataset rows start there too.
+        opacity = self.gauss_params["opacities"].detach().median()
         moved = []
         for index, trajectory in enumerate(trajectories):
             if index in replaced or trajectory["label"] not in PEDESTRIANS or trajectory["stationary"]:
@@ -214,19 +232,32 @@ class PedestrianModel(SplatADModel):
             if travel < cfg.deform_min_travel:
                 continue
             rows = (ids == index).nonzero(as_tuple=True)[0]
-            if not len(rows):
-                continue
-            if len(rows) > cfg.deform_max_gaussians:
-                generator = torch.Generator(device=rows.device).manual_seed(torch.initial_seed() + index)
-                order = torch.randperm(len(rows), generator=generator, device=rows.device)
-                rows = rows[order[:cfg.deform_max_gaussians]]
-            seed = {name: self.gauss_params[name][rows] for name in GAUSSIAN_PARAMETERS}
+            dataset = seeds.get(trajectory["uuid"])
+            generator = torch.Generator().manual_seed(torch.initial_seed() + index)
+            route = self.actor_routes[index]
+            if dataset is not None and len(dataset[0]) >= cfg.deform_seed_min_points:
+                points, colors, source = dataset
+                if len(points) > cfg.deform_max_gaussians:
+                    keep = torch.randperm(len(points), generator=generator)[:cfg.deform_max_gaussians].numpy()
+                    points, colors, source = points[keep], colors[keep], source[keep]
+                seed = seed_gaussians(points, colors, opacity, getattr(cfg, "init_scale", 1.0), cfg.feature_dim,
+                                      generator)
+                seed = {name: value.to(self.gauss_params[name]) for name, value in seed.items()}
+                route.update(seed="dataset", seed_lidar=int((source == 0).sum()), seed_fill=int((source == 1).sum()),
+                             bank_rows_replaced=len(rows))
+            else:
+                if not len(rows):
+                    continue
+                if len(rows) > cfg.deform_max_gaussians:
+                    order = torch.randperm(len(rows), generator=generator).to(rows.device)
+                    rows = rows[order[:cfg.deform_max_gaussians]]
+                seed = {name: self.gauss_params[name][rows] for name in GAUSSIAN_PARAMETERS}
+                route.update(seed="splatad")
             if self.deformation_field is None:
                 self.deformation_field = OmniReDeformationField().to(seed["means"])
             self.deformable_people.append(DeformablePedestrian(
                 index, seed, self.dynamic_actors.unique_timestamps, self.dynamic_actors.actor_sizes[index]))
-            self.actor_routes[index].update(representation="deformable", gaussians=len(rows),
-                                            travel_m=round(travel, 2))
+            route.update(representation="deformable", gaussians=len(seed["means"]), travel_m=round(travel, 2))
             moved.append(index)
         return moved
 

@@ -350,6 +350,9 @@ def make_config(args):
             if args.ground:
                 config.pipeline.model.ground_path = args.ground.resolve()
                 config.pipeline.model.ground_digest = sha256(args.ground)
+            if args.deform_seed:
+                config.pipeline.model.deform_seed_path = args.deform_seed.resolve()
+                config.pipeline.model.deform_seed_digest = sha256(args.deform_seed)
     config.pipeline.calc_fid_steps = ()
     datamanager = config.pipeline.datamanager
     datamanager.cache_images = datamanager.cache_lidars = "cpu"
@@ -385,6 +388,8 @@ def main():
     parser.add_argument("--body", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--ground", type=Path, help="R3 local road planes written by research.ground")
+    parser.add_argument("--deform-seed", type=Path,
+                        help="R3 dataset seed for deformable pedestrians written by research.deform_seed")
     parser.add_argument("--smpl-follow-box", action=argparse.BooleanOptionalAction, default=True,
                         help="R3: express SMPL roots in their learned cuboid (use --no-smpl-follow-box to ablate)")
     parser.add_argument("--deform-start", type=int, default=3000,
@@ -423,6 +428,8 @@ def main():
         parser.error("--deform-start must be nonnegative")
     if args.ground and (args.resume or args.variant != "R3"):
         parser.error("--ground applies to a new R3 run. Resume reuses the saved configuration.")
+    if args.deform_seed and (args.resume or args.variant != "R3"):
+        parser.error("--deform-seed applies to a new R3 run. Resume reuses the saved configuration.")
     if args.resume:
         if not args.checkpoint:
             parser.error("--resume requires --checkpoint")
