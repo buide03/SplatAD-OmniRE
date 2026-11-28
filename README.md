@@ -23,7 +23,7 @@ R2 và R3 chỉ cải tiến phần người đi bộ của SplatAD. Nền, xe, 
 | Pose người | Cùng `smpl.pkl` từ pipeline 4D-Humans của OmniRe trên sáu camera |
 | Đo RGB | Cùng bộ ảnh đo, cùng crop và cùng SSIM `pytorch_msssim` (`research.quality.score_images`) |
 
-Mỗi mô hình giữ lịch train riêng của nó, ví dụ OmniRe tăng dần độ phân giải trong 500 bước đầu. OmniRe không render LiDAR nên chỉ có số đo RGB. Bảng `artifacts/<run_id>/<scene>-summary/summary.md` so bốn mô hình ở các bước 2.500, 5.000, 7.500 và 10.000.
+Mỗi mô hình giữ lịch train riêng của nó, ví dụ OmniRe tăng dần độ phân giải trong 500 bước đầu. Ngoại lệ duy nhất: OmniRe ngừng tách/nhân Gaussian ở bước 7.000 (`STOP_SPLIT_AT`) thay vì 15.000. Cấu hình gốc load PandaSet ở nửa độ phân giải; ở độ phân giải gốc, lượt 030 có 4,48 triệu Gaussian nền ở bước 7.500 và hết 22 GB GPU của L4. Việc tỉa Gaussian vẫn chạy như cũ. OmniRe không render LiDAR nên chỉ có số đo RGB. Bảng `artifacts/<run_id>/<scene>-summary/summary.md` so bốn mô hình ở các bước 2.500, 5.000, 7.500 và 10.000.
 
 ### R3: sửa các vấn đề của R2
 

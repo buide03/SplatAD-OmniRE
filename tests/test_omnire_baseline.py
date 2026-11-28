@@ -19,6 +19,8 @@ def test_omnire_sees_the_splatad_data_and_budget():
     assert settings["data.pixel_source.test_image_stride"] == "0"
     assert settings["data.lidar_source.only_use_360_lidar"] == "True"
     assert settings["trainer.optim.num_iters"] == "10000" and settings["seed"] == "42"
+    # Native resolution would densify past a 22 GB GPU; every splitting class stops at the same step.
+    assert {settings[f"model.{name}.ctrl.stop_split_at"] for name in ("Background", "RigidNodes", "DeformableNodes")} == {"7000"}
     # DriveStudio PandaSet camera ids 0-5.
     assert OMNIRE_CAMERAS.index("front") == 0 and OMNIRE_CAMERAS.index("back") == 5
 

@@ -35,9 +35,19 @@ def run_module(name, argv, path=False):
         sys.argv = saved
 
 
+# The official config loads PandaSet at half resolution. At native resolution its split/duplicate rule grew the
+# background to 4.48M Gaussians by step 7,500 of scene 030 and ran a 22 GB L4 out of memory while pruning
+# (~350k more every 500 steps). Its schedule stops splitting at 15,000 of 30,000 steps, so a 10,000-step run
+# never stops; scaled to 10,000 steps it would stop at 5,000. 7,000 is where the crashed run's resume state
+# sits, and leaves ~4.4M Gaussians, near SplatAD's 5M MCMC cap.
+STOP_SPLIT_AT = 7000
+SPLITTING_CLASSES = ("Background", "RigidNodes", "DeformableNodes")
+
+
 def shared_settings(processed, scene, steps, seed, checkpoint_every):
     """Overrides that make OmniRe see the data and budget of the SplatAD runs."""
     return [
+        *(f"model.{name}.ctrl.stop_split_at={STOP_SPLIT_AT}" for name in SPLITTING_CLASSES),
         "dataset=pandaset/6cams",
         f"data.data_root={processed}",
         f"data.scene_idx={int(scene)}",
