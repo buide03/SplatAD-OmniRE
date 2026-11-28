@@ -9,7 +9,7 @@ from torch import nn
 from nerfstudio.models.splatad import SplatADModel, SplatADModelConfig
 
 from .far_fit import FarFit, choose_phase
-from .gait import average_cycle, gait_cycle, paint
+from .gait import average_cycle, floor_planes, gait_cycle, library_cycle, paint, save_cycle
 from .geometry import BodyModel
 from .pose_constraints import PoseConstraints
 from .prepare import PEDESTRIANS, read_json, sha256, validate_tracks
@@ -53,6 +53,10 @@ class PedestrianModelConfig(SplatADModelConfig):
     """Sweeps per far walker drawn at each step for the LiDAR term."""
     gait_phase_steps: int = 24
     """Grid of starting gait phases searched against the keypoints and LiDAR before training."""
+    gait_library: Path | None = None
+    """Folder of scene mean gaits. A scene with near walkers saves its own; one without borrows them."""
+    far_ground: bool = True
+    """Far walkers: stance feet on the annotated cuboid floor, no penetration, no slip."""
     smpl_follow_box: bool = True
     """Express each SMPL root in its learned cuboid frame, so trajectory optimization moves the mesh."""
     smpl_min_frames: int = 5
@@ -225,7 +229,8 @@ class PedestrianModel(SplatADModel):
         return load_seed(cfg.deform_seed_path, cfg.scene_id)
 
     def gait_cycle(self, trajectories):
-        """The scene's mean gait from every near SMPL walker with a closed leg cycle, or None."""
+        """The scene's mean gait from its near SMPL walkers, else the gait library of other scenes, or None."""
+        cfg = self.config
         index_of = {t["uuid"]: i for i, t in enumerate(trajectories)}
         cycles = []
         for person in self.people:
@@ -235,7 +240,16 @@ class PedestrianModel(SplatADModel):
             cycle = gait_cycle(person, person.anchor_rotation, person.anchor_position, height)
             if cycle is not None:
                 cycles.append(cycle)
-        return average_cycle(cycles) if cycles else None
+        if cycles:
+            mean = average_cycle(cycles)
+            mean["source"] = "scene"
+            if cfg.gait_library is not None:
+                save_cycle(Path(cfg.gait_library) / f"{cfg.scene_id}.json", mean, cfg.scene_id)
+            return mean
+        borrowed = library_cycle(cfg.gait_library, cfg.scene_id)
+        if borrowed is not None:
+            borrowed["source"] = "library"
+        return borrowed
 
     def far_evidence(self):
         """ViTPose keypoints by UUID and (LiDAR timestamps, per-frame returns by UUID), when configured."""
@@ -276,7 +290,7 @@ class PedestrianModel(SplatADModel):
             if travel < cfg.gait_min_travel or len(frame_ids) < 2:
                 continue
             if cycle is None:
-                route["gait_skipped"] = "no near SMPL walker with a closed leg cycle"
+                route["gait_skipped"] = "no near SMPL walker with a closed leg cycle and no gait library"
                 continue
             uuid = trajectory["uuid"]
             times = all_times[frame_ids]
@@ -296,9 +310,14 @@ class PedestrianModel(SplatADModel):
                          float(metadata["scene_time_offset"]), lidar_times, height, cfg.keypoint_min_score)
             decided = choose_phase(person, fit, cycle, times, rotations, centers, height, cfg.gait_phase_steps)
             person.exact_velocity = True
+            if cfg.far_ground:
+                # Every pose stands on its annotated cuboid floor, which the stance foot starts on.
+                person.constraints = PoseConstraints(person, set(person.frame_ids.tolist()),
+                                                     floor_planes(person, height), torch.eye(4), prefit=False)
+                route.update(ground="cuboid_floor", stance_frames=int(person.constraints.contact.any(dim=-1).sum()))
             route["rigid_gaussians_replaced"] = route["gaussians"]
             route.update(representation="smpl_gait", gaussians=len(person.means), follows_box=True,
-                         travel_m=round(travel, 2), gait_donors=cycle["donors"],
+                         travel_m=round(travel, 2), gait_source=cycle["source"], gait_donors=cycle["donors"],
                          gait_period_s=round(cycle["period_s"], 3), gait_closing_deg=cycle["closing_deg"],
                          gait_swing_deg=cycle["swing_deg"], **decided)
             dataset = seeds.get(uuid)

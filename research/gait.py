@@ -16,7 +16,9 @@ gets the skeleton and skinning of SMPL, with the pose initialized from the scene
 Afterwards the pose trains like any other R3 SMPL track (per-frame refinement, smoothing, box), plus
 the keypoint and LiDAR terms of research.far_fit.
 """
+import json
 import math
+from pathlib import Path
 
 import torch
 from torch.nn import functional as F
@@ -160,6 +162,46 @@ def average_cycle(cycles, samples=24):
         "direction": torch.tensor([1.0, 0.0]), "pelvis": ordered[0]["pelvis"],
         "closing_deg": max(c["closing_deg"] for c in ordered), "swing_deg": min(c["swing_deg"] for c in ordered),
     }
+
+
+LIBRARY_FIELDS = ("root", "body", "translation", "pelvis", "direction")
+
+
+def save_cycle(path, cycle, scene_id):
+    """Keep a scene's mean gait for scenes without a near walker (tensors as lists)."""
+    record = {key: value.tolist() if torch.is_tensor(value) else value for key, value in cycle.items()}
+    record["scene_id"] = str(scene_id)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and json.loads(path.read_text(encoding="utf-8")) == json.loads(json.dumps(record)):
+        return False
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record), encoding="utf-8")
+    temporary.replace(path)
+    return True
+
+
+def library_cycle(folder, scene_id):
+    """The mean of the gait cycles other scenes saved in ``folder``, or None."""
+    cycles = []
+    for path in sorted(Path(folder).glob("*.json")) if folder is not None and Path(folder).is_dir() else []:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record.get("scene_id") == str(scene_id):
+            continue
+        for key in LIBRARY_FIELDS:
+            record[key] = torch.tensor(record[key], dtype=torch.float32)
+        record["uuid"] = f"scene {record['scene_id']}"
+        record.setdefault("score", 0.0)
+        cycles.append(record)
+    return average_cycle(cycles) if cycles else None
+
+
+def floor_planes(person, height):
+    """The annotated cuboid floor at each pose, as scene-frame planes (normal, offset) keyed by frame."""
+    up = person.anchor_rotation[..., :, 2]
+    point = person.anchor_position - height / 2 * up
+    offset = -(up * point).sum(-1)
+    return {str(int(f)): [*n.tolist(), float(o)] for f, n, o in zip(person.frame_ids, up, offset)}
 
 
 def sample_cycle(cycle, phase):

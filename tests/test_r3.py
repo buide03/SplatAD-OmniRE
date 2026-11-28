@@ -1,5 +1,6 @@
 """CPU checks for R3: OmniRe regularizers, far walkers on a borrowed gait, ground contact and bank routing."""
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -209,7 +210,8 @@ def close_rows(uuid, frames, height=200, bin_name="near", source="4d_humans"):
              "bbox_height_px": height, "pose_source": source} for f in frames]
 
 
-def build_model(module, monkeypatch, variant, observations=None, seeds=None, donor_walks=True, evidence=None):
+def build_model(module, monkeypatch, variant, observations=None, seeds=None, donor_walks=True, evidence=None,
+                library=None):
     walk = torch.eye(4).repeat(4, 1, 1)
     walk[:, 0, 3] = torch.arange(4) * 0.4
     trajectories = [
@@ -236,7 +238,7 @@ def build_model(module, monkeypatch, variant, observations=None, seeds=None, don
         smpl_follow_box=True, smpl_min_frames=5, smpl_min_box_px=80.0, local_offset_weight=0.01,
         deform_seed_path=None, deform_seed_digest="", deform_seed_min_points=64, init_scale=0.2,
         keypoints_path=None, keypoints_digest="", keypoint_min_score=0.3, keypoint_weight=0.05,
-        lidar_fit_weight=0.05, lidar_fit_frames=4, gait_phase_steps=24)
+        lidar_fit_weight=0.05, lidar_fit_frames=4, gait_phase_steps=24, gait_library=library, far_ground=True)
     if seeds is not None:
         monkeypatch.setattr(module.PedestrianModel, "deform_seeds", lambda self: seeds)
     if evidence is not None:
@@ -343,7 +345,7 @@ def test_gait_cycle_finds_the_period_and_turns_with_the_walker():
 def test_r3_without_a_walking_donor_leaves_far_walkers_rigid(pedestrian_model_class, monkeypatch):
     model = build_model(pedestrian_model_class, monkeypatch, "R3", donor_walks=False)
     assert [route["representation"] for route in model.actor_routes] == ["rigid", "smpl", "rigid", "rigid"]
-    assert model.actor_routes[2]["gait_skipped"] == "no near SMPL walker with a closed leg cycle"
+    assert model.actor_routes[2]["gait_skipped"] == "no near SMPL walker with a closed leg cycle and no gait library"
 
 
 def test_r3_without_any_near_smpl_track_has_nothing_to_borrow(pedestrian_model_class, monkeypatch):
@@ -449,9 +451,12 @@ def test_r3_gradients_reach_meshes_poses_and_box(pedestrian_model_class, monkeyp
     for loss, reached in rows.items():
         print(" | ".join([loss, *("x" if group in reached else "." for group in groups)]))
     assert rows["render (RGB + LiDAR)"] == set(groups)
-    # Smoothing reaches both walkers; ground contact only the near one, which has LiDAR ground frames.
+    # Smoothing reaches both walkers.
     assert rows["r3_trans_smooth"] == rows["r3_joint_smooth"] == {"Pose SMPL", "Pose người xa", "Quỹ đạo hộp"}
     assert rows["r3_local_offset"] == {"Pose SMPL", "Pose người xa"}
+    # Ground contact: the near track on its LiDAR planes, the far walker on its cuboid floor. The toy
+    # walker's box slides at 4 m/s, too fast for a planted foot, and it starts on its floor, so none of the
+    # three terms has a gradient for it here. test_far_walker_stands_on_its_cuboid_floor covers it.
     assert rows["r3_foot_contact"] == rows["r3_ground_penetration"] == rows["r3_foot_slip"] == {"Pose SMPL", "Quỹ đạo hộp"}
     assert rows["r3_knn"] == rows["r3_max_scale"] == {"Gaussian SMPL", "Gaussian người xa"}
     assert "r3_out_of_bound" not in rows
@@ -614,3 +619,49 @@ def test_r3_adds_keypoint_and_lidar_terms_for_far_walkers(pedestrian_model_class
     walker = model.people[1]
     assert walker.body.grad is not None and walker.translation.grad.abs().sum() > 0
     assert model.people[0].body.grad is None
+
+
+def test_far_walker_stands_on_its_cuboid_floor(pedestrian_model_class, monkeypatch):
+    model = build_model(pedestrian_model_class, monkeypatch, "R3")
+    walker = model.people[1]
+    assert model.actor_routes[2]["ground"] == "cuboid_floor"
+    # Box centres sit at z = 0 with height 1, so the floor is z = -0.5 at every pose.
+    torch.testing.assert_close(walker.constraints.normals, torch.tensor([0.0, 0.0, 1.0]).expand(11, 3))
+    torch.testing.assert_close(walker.constraints.offsets, torch.full((11,), 0.5))
+
+    # A stick figure walking at 1.4 m/s plants its stance foot on the floor; lifted, it is pulled back.
+    from research.gait import floor_planes
+    times = torch.arange(15, dtype=torch.float32) / 10
+    walker, box_at = far_walker(times)
+    rotations, centers = box_at(times)
+    choose_phase(walker, FarFit(walker, [], [], torch.eye(4), 0.0, [], 1.75), walking_donor_cycle(),
+                 times, rotations, centers, 1.75, steps=1)
+    constraints = PoseConstraints(walker, set(range(15)), floor_planes(walker, 1.75), torch.eye(4))
+    assert int(constraints.contact.any(dim=-1).sum()) >= 10
+    time = next(t for t, planted in zip(times, constraints.contact.any(dim=-1)) if planted)
+    planted = float(constraints.losses(walker, time)["foot_contact"].detach())
+    assert planted < 0.02  # Within a few centimetres: the floor is the median low point over the stride.
+    with torch.no_grad():
+        walker.translation[:, 2] += 0.1
+    floating = constraints.losses(walker, time)["foot_contact"]
+    assert floating > planted + 0.05
+    floating.backward()
+    assert walker.translation.grad[:, 2].sum() > 0
+
+
+def test_scene_gait_is_saved_and_lent_to_a_scene_without_near_walkers(pedestrian_model_class, monkeypatch, tmp_path):
+    library = tmp_path / "gait-library"
+    donor_scene = build_model(pedestrian_model_class, monkeypatch, "R3", library=library)
+    assert donor_scene.actor_routes[2]["gait_source"] == "scene"
+    saved = json.loads((library / "030.json").read_text())
+    assert saved["scene_id"] == "030" and saved["donors"] == ["smpl"] and len(saved["body"]) == 24
+
+    # Another scene whose only SMPL track does not walk borrows the saved gait.
+    (library / "030.json").rename(library / "028.json")
+    saved["scene_id"] = "028"
+    (library / "028.json").write_text(json.dumps(saved))
+    borrowed = build_model(pedestrian_model_class, monkeypatch, "R3", donor_walks=False, library=library)
+    route = borrowed.actor_routes[2]
+    assert route["representation"] == "smpl_gait" and route["gait_source"] == "library"
+    assert route["gait_donors"] == ["scene 028"] and route["gait_period_s"] == pytest.approx(0.6, abs=0.03)
+    assert not (library / "030.json").exists()  # A scene without walkers saves nothing.

@@ -7,7 +7,7 @@ Pipeline nghiên cứu tái tạo nền, xe và người đi bộ trong cùng c�
 | **SplatAD** | Người đi bộ không được tách khỏi nền | Mô hình gốc tại commit đã pin, MCMC đến 5 triệu Gaussian |
 | **R2** | Một Gaussian trên mỗi vertex SMPL. Người không có SMPL là actor rigid | Gaussian, root translation, root rotation và 23 rotation khớp. Nền và xe giữ MCMC và lật actor của SplatAD |
 | **R2/vận tốc 0** | Cùng checkpoint R2 | Đặt riêng vận tốc Gaussian người về 0 khi render |
-| **R3** | Như R2. Người đi bộ ở xa không có pose 4D-Humans dùng SMPL với chu kỳ bước mượn từ người gần | R2 cộng regularizer SMPL của OmniRe, tiếp đất theo LiDAR, SMPL gắn vào hộp đang học. Train 30.000 bước |
+| **R3** | Như R2. Người đi bộ ở xa không có pose 4D-Humans dùng SMPL với chu kỳ bước mượn từ người gần | R2 cộng regularizer SMPL của OmniRe, tiếp đất theo LiDAR, SMPL gắn vào hộp đang học. Chạy thử 10.000 bước |
 | **OmniRe** | Mã DriveStudio gốc: SMPL cho người có pose, Gaussian biến dạng cho người còn lại | `configs/omnire.yaml` với `pandaset/6cams`, chỉ thay các thiết lập chung bên dưới |
 
 R2 và R3 chỉ cải tiến phần người đi bộ của SplatAD. Nền, xe, decoder, loss RGB/LiDAR và GSplat để render giữ nguyên của SplatAD. Gaussian người đi qua adapter `scene_gaussians` vào cùng hai lời gọi rasterization RGB và LiDAR.
@@ -19,7 +19,7 @@ R2 và R3 chỉ cải tiến phần người đi bộ của SplatAD. Nền, xe, 
 | Cảnh và frame | `030`, toàn bộ 80 frame dùng để train |
 | Camera | Sáu camera ở độ phân giải gốc. Camera sau bỏ 260 hàng dưới theo SplatAD khi đo |
 | LiDAR | Pandar64 360°. Rasterizer LiDAR của SplatAD chỉ hỗ trợ cảm biến này, nên OmniRe đặt `only_use_360_lidar=True` |
-| Ngân sách | 10.000 bước, seed 42. R3 train 30.000 bước với cùng lịch learning rate (`--schedule-steps` 30.001 cho mọi mô hình), nên bước 10.000 của R3 so trực tiếp được với ba mô hình kia |
+| Ngân sách | 10.000 bước, seed 42. Mọi mô hình dùng chung lịch learning rate (`--schedule-steps` 30.001), nên đặt `R3_STEPS = 30_000` trong notebook sẽ train tiếp R3 từ checkpoint 10.000 |
 | Pose người | Cùng `smpl.pkl` từ pipeline 4D-Humans của OmniRe trên sáu camera |
 | Đo RGB | Cùng bộ ảnh đo, cùng crop và cùng SSIM `pytorch_msssim` (`research.quality.score_images`) |
 
@@ -54,12 +54,15 @@ R3 hiện tại thay MLP bằng khung xương có dáng đi chuẩn, rồi buộ
 2. **Gắn vào hộp.** Người xa nhận SMPL dáng trung bình gắn vào hộp của nó. Pha tăng theo quãng đường hộp đi được, mỗi chu kỳ một sải bước (sải bước trên mỗi mét chiều cao hộp lấy từ người gần, nhịp bước giữ trong 0,5–1,5 lần nhịp của họ), nên hộp dừng thì chân dừng. Chu kỳ xoay theo hướng đi của hộp, khung chậu nằm giữa hộp, bàn chân trụ chạm đáy hộp.
 3. **Keypoint 2D** (`research/keypoints.py`). ViTPose (`usyd-community/vitpose-base-simple`, `transformers` 4.53.2) chạy top-down trên bbox của mọi quan sát người đi bộ trong manifest, nới 15% mỗi cạnh, cho 17 keypoint COCO kèm độ tin cậy và camera PandaSet của ảnh đó.
 4. **LiDAR từng khung.** File của `research.deform_seed` (v2) giữ các điểm Pandar64 của từng khung trong cuboid của khung đó, bỏ điểm sát đáy hộp (mặt đường).
+   Cảnh không có người gần nào đi bộ rõ thì mượn dáng đi chuẩn đã lưu của các cảnh khác: mỗi lượt R3 có người gần ghi dáng đi của cảnh vào `MyDrive/SplatAD+OmniRe/gait-library/<cảnh>.json` (`--gait-library`), cảnh thiếu người gần lấy trung bình các file đó. `scene_routes.json` ghi `gait_source` là `scene` hay `library`. Chưa có thư viện thì người xa giữ actor rigid như R2.
 5. **Chọn pha ban đầu** (`research/far_fit.py`). Thử 24 pha, giữ pha cho tổng hai loss dưới đây nhỏ nhất, nên chân nào bước trước khớp với dữ liệu.
 6. **Phạt khi train.** Pose train như mọi track SMPL của R3 (tinh chỉnh từng frame, hai loss làm mượt, `local_offset`, quỹ đạo hộp), cộng:
    - `r3_keypoint`: 12 khớp SMPL (vai, khuỷu, cổ tay, hông, gối, cổ chân) chiếu bằng camera của từng quan sát, so với keypoint có độ tin cậy ≥ 0,3, sai số tính theo chiều cao bbox;
    - `r3_lidar_fit`: khoảng cách từ mỗi điểm LiDAR của 4 khung ngẫu nhiên tới tâm Gaussian gần nhất của mesh đã đặt pose, trong hệ cảnh, nên kéo được cả pose lẫn hộp.
 
-   Cả hai dùng phạt Geman–McClure r²/(r²+σ²) (σ = 0,1 chiều cao bbox và 0,1 m): bậc hai khi gần đúng, bị chặn khi gặp keypoint trái/phải bị đổi hay điểm của vật che. Khác loss so màu, gradient của hai loss này luôn chỉ về đáp án kể cả khi chân đang lệch nhiều pixel.
+   - tiếp đất (`r3_foot_contact`, `r3_ground_penetration`, `r3_foot_slip`): mặt đáy cuboid đã gán nhãn ở từng khung là mặt đường của người xa (LiDAR ở 35–66 m quá thưa để fit mặt đường cục bộ như người gần). Bàn chân trụ bám mặt đáy, không xuyên xuống, không trượt, nên mesh không lơ lửng. Khung bàn chân trụ được nhận ra từ dáng đi lúc khởi tạo (chân cách mặt đáy ≤ 20 cm, chậm hơn 0,65 m/s).
+
+   Cả hai loss keypoint và LiDAR dùng phạt Geman–McClure r²/(r²+σ²) (σ = 0,1 chiều cao bbox và 0,1 m): bậc hai khi gần đúng, bị chặn khi gặp keypoint trái/phải bị đổi hay điểm của vật che. Khác loss so màu, gradient của hai loss này luôn chỉ về đáp án kể cả khi chân đang lệch nhiều pixel.
 
 `scene_routes.json` ghi `smpl_gait` cho người xa, kèm các người cho mượn (`gait_donors`), chu kỳ, pha đã chọn, sải bước, nhịp bước, góc xoay, số quan sát keypoint, số khung LiDAR, sai số keypoint (px) và loss LiDAR lúc khởi tạo, và tỉ lệ vertex tô được màu từ dữ liệu.
 
@@ -70,7 +73,7 @@ Hai loss làm mượt tính trên vị trí khớp trong hệ cảnh (hộp ∘ 
 | `r3_trans_smooth` (khung chậu, bước 1–5 pose) | 0,01 | pose SMPL, quỹ đạo hộp |
 | `r3_joint_smooth` (24 khớp, 3 pose liên tiếp) | 0,01 | pose SMPL, quỹ đạo hộp |
 | `r3_local_offset` | 0,01 | pose SMPL |
-| `r3_foot_contact`, `r3_ground_penetration` | 0,1 | pose SMPL, quỹ đạo hộp |
+| `r3_foot_contact`, `r3_ground_penetration` (người gần: mặt đường LiDAR; người xa: đáy cuboid) | 0,1 | pose SMPL, quỹ đạo hộp |
 | `r3_foot_slip` | 0,1 | pose SMPL, quỹ đạo hộp |
 | `r3_knn` | 0,001 | Gaussian SMPL |
 | `r3_max_scale` | 0,05 | Gaussian SMPL |
@@ -78,7 +81,7 @@ Hai loss làm mượt tính trên vị trí khớp trong hệ cảnh (hộp ∘ 
 | `r3_keypoint` (người xa) | 0,05 | pose người xa, quỹ đạo hộp |
 | `r3_lidar_fit` (người xa, 4 khung mỗi bước) | 0,05 | pose và Gaussian người xa, quỹ đạo hộp |
 
-Loss RGB và LiDAR của SplatAD đi tới mọi nhóm: Gaussian nền và xe, Gaussian và pose SMPL của người gần lẫn người xa, quỹ đạo hộp. Tiếp đất theo LiDAR chỉ áp cho người gần có frame mặt đường. `tests/test_r3.py::test_r3_gradients_reach_meshes_poses_and_box` kiểm tra ma trận này.
+Loss RGB và LiDAR của SplatAD đi tới mọi nhóm: Gaussian nền và xe, Gaussian và pose SMPL của người gần lẫn người xa, quỹ đạo hộp. Tiếp đất áp cho người gần ở frame có mặt đường LiDAR và cho người xa trên đáy cuboid. `tests/test_r3.py::test_r3_gradients_reach_meshes_poses_and_box` kiểm tra ma trận này.
 
 Trọng số theo [configs/omnire.yaml](https://github.com/ziyc/drivestudio/blob/e59bda4fa681f829dbb1d65f0de582b0f633c450/configs/omnire.yaml). OmniRe để `joint_smooth` ở dạng chú thích. R3 bật nó với trọng số đã ghi trong file đó vì R2 bị giật. Với CLI, `--ground` nhận file của `python -m research.ground` `--deform-seed` nhận file `.npz` của `python -m research.deform_seed` (màu và LiDAR từng khung cho người xa) và `--keypoints` nhận file của `python -m research.keypoints`. Trọng số hai loss mới là giá trị khởi đầu, chưa được dò. Người xa có dưới 64 điểm trong file giữ màu xám mặc định của SMPL. Dashboard và `training.jsonl` ghi các loss `r3_*`. `scene_routes.json` ghi UUID nào dùng `smpl`, `smpl_gait` hay `rigid`.
 
@@ -86,7 +89,7 @@ Trọng số theo [configs/omnire.yaml](https://github.com/ziyc/drivestudio/blob
 
 1. Đặt `pandaset.zip` trong `MyDrive/SplatAD+OmniRe/`, mở [PandaSet_Colab.ipynb](PandaSet_Colab.ipynb) bằng [Colab](https://colab.research.google.com/) và mount Drive. Để trống `PANDASET_PATH` để ưu tiên ZIP trong thư mục dự án, rồi tự dò My Drive và Shared Drives nếu ZIP này vắng. Có thể chỉ định ZIP khác hoặc thư mục đã giải nén trong `PANDASET_PATH`. Colab giải nén tạm các cảnh đã chọn vào `/content/pandaset-from-drive` và kiểm tra ảnh, scan LiDAR và cuboid của cảnh.
 2. Chạy cell **Xem video Gốc và Pose SMPL** để xem cảnh đầu tiên từ Drive. Khi train R2/R3, chọn GPU và tải gói `SMPL_python_v.1.1.0.zip` theo hướng dẫn OmniRe. Đặt file `basicmodel_neutral_lbs_10_207_0_v1.1.0.pkl` hoặc gói đã giải nén vào `MyDrive/SplatAD+OmniRe/`. Notebook tìm file Neutral trong `SMPL_python_v.1.1.0/smpl/models/`, kể cả khi gói có thêm một thư mục cùng tên bên ngoài. Notebook cũng nhận cùng bản v1.1 dưới tên `SMPL_NEUTRAL.pkl` ở thư mục dự án. [Trang tải SMPL](https://smpl.is.tue.mpg.de/download.php)
-3. Mặc định `STAGE = "scene"` train SplatAD gốc, R2, R3 rồi OmniRe gốc trên cảnh `030` với sáu camera, 10.000 bước cho mỗi mô hình và 30.000 bước cho R3 (`R3_STEPS`). R3 lưu checkpoint trong `runs/030-R3-gait/`, nên lượt R3 dùng MLP biến dạng trước đó không bị nạp nhầm. Checkpoint đã đủ bước được dùng lại. Mã run ghi `surround` cho sáu camera và `front3` cho ba camera trước, nên lượt ba camera cũ vẫn giữ nguyên trên Drive. `STAGE = "curriculum"` chạy cùng các mô hình qua `028 → 011 → 008`. Sửa `SCENES` để chọn cảnh. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước. Tất cả các preset train RGB ở độ phân giải gốc từ bước 0. Các run Colab có `fullres` trong tên thư mục checkpoint. Lượt theo bộ đo và adapter v2 có `rgbq-v2` trong mã run.
+3. Mặc định `STAGE = "scene"` train SplatAD gốc, R2, R3 rồi OmniRe gốc trên cảnh `030` với sáu camera, 10.000 bước cho mỗi mô hình (`R3_STEPS` đổi riêng số bước của R3). R3 lưu checkpoint trong `runs/030-R3-gait/`, nên lượt R3 dùng MLP biến dạng trước đó không bị nạp nhầm. Checkpoint đã đủ bước được dùng lại. Mã run ghi `surround` cho sáu camera và `front3` cho ba camera trước, nên lượt ba camera cũ vẫn giữ nguyên trên Drive. `STAGE = "curriculum"` chạy cùng các mô hình qua `028 → 011 → 008`. Sửa `SCENES` để chọn cảnh. Các preset `smoke`, `pilot` và `confirm` lần lượt dùng 200, 1.200 và 4.000 bước. Tất cả các preset train RGB ở độ phân giải gốc từ bước 0. Các run Colab có `fullres` trong tên thư mục checkpoint. Lượt theo bộ đo và adapter v2 có `rgbq-v2` trong mã run.
 4. Với mỗi cảnh, notebook xuất clip gốc và clip tái tạo `front-triptych.mp4` sau khi có checkpoint. Dashboard có các thẻ **Gốc**, **SplatAD**, **R2**, **R3** và **OmniRe**. Mỗi thẻ mô hình phát video ba camera trước render từ checkpoint cuối ở 60 FPS, trên cùng đồng hồ phát lại. Video OmniRe dùng cùng đường camera nội suy, còn trạng thái cảnh của OmniRe đổi theo frame 10 Hz vì OmniRe biểu diễn thời gian theo chỉ số frame. Mục **PSNR và SSIM** là bảng ba hàng người đi bộ, phương tiện, toàn cảnh và bốn cột SplatAD, R2, R3, OmniRe, mặc định ở bước cuối mà mọi mô hình cùng đo. Trong `MyDrive/SplatAD+OmniRe/`, `inputs/` và `pose-init/` chứa dữ liệu đã chuẩn bị, `runs/` chứa checkpoint, `artifacts/` chứa video, monitor và metric.
 
 ### OmniRe gốc

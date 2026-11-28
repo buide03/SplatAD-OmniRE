@@ -348,6 +348,8 @@ def make_config(args):
             if args.keypoints:
                 config.pipeline.model.keypoints_path = args.keypoints.resolve()
                 config.pipeline.model.keypoints_digest = sha256(args.keypoints)
+            if args.gait_library:
+                config.pipeline.model.gait_library = args.gait_library.resolve()
     config.pipeline.calc_fid_steps = ()
     datamanager = config.pipeline.datamanager
     datamanager.cache_images = datamanager.cache_lidars = "cpu"
@@ -378,6 +380,8 @@ def main():
                         help="R3 dataset points of far walkers (colour and per-frame LiDAR), from research.deform_seed")
     parser.add_argument("--keypoints", type=Path,
                         help="R3 ViTPose keypoints of the manifest observations, written by research.keypoints")
+    parser.add_argument("--gait-library", type=Path,
+                        help="R3 folder of scene mean gaits: saved when the scene has near walkers, read when not")
     parser.add_argument("--smpl-follow-box", action=argparse.BooleanOptionalAction, default=True,
                         help="R3: express SMPL roots in their learned cuboid (use --no-smpl-follow-box to ablate)")
     parser.add_argument("--output", type=Path, default=Path("runs"))
@@ -416,6 +420,8 @@ def main():
         parser.error("--deform-seed applies to a new R3 run. Resume reuses the saved configuration.")
     if args.keypoints and (args.resume or args.variant != "R3"):
         parser.error("--keypoints applies to a new R3 run. Resume reuses the saved configuration.")
+    if args.gait_library and (args.resume or args.variant != "R3"):
+        parser.error("--gait-library applies to a new R3 run. Resume reuses the saved configuration.")
     if args.resume:
         if not args.checkpoint:
             parser.error("--resume requires --checkpoint")
