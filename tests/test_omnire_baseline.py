@@ -1,8 +1,12 @@
 """CPU checks for the OmniRe baseline settings, shared RGB scoring and the four-model summary."""
+import glob
+import sys
+from types import ModuleType
+
 import pytest
 import torch
 
-from research.omnire_baseline import OMNIRE_CAMERAS, checkpoints, shared_settings
+from research.omnire_baseline import OMNIRE_CAMERAS, checkpoints, read_gzipped_pandaset, shared_settings
 from research.quality import score_images
 from research.summary import markdown, summarize
 
@@ -23,6 +27,28 @@ def test_checkpoints_are_ordered_and_final_counts_as_the_budget(tmp_path):
     for name in ("checkpoint_05000.pth", "checkpoint_final.pth", "checkpoint_02500.pth", "config.yaml"):
         (tmp_path / name).touch()
     assert [step for step, _ in checkpoints(tmp_path, 10000)] == [2500, 5000, 10000]
+
+
+def test_staged_lidar_and_cuboids_are_found(tmp_path, monkeypatch):
+    class Sensor:
+        """The pinned devkit's lookup: sweeps are the files matching *.<_data_file_extension>."""
+        _data_file_extension = property(lambda self: "pkl")
+
+        def files(self, folder):
+            return sorted(glob.glob(f"{folder}/*.{self._data_file_extension}"))
+
+    modules = {"pandaset": ModuleType("pandaset"), "pandaset.annotations": ModuleType("pandaset.annotations"),
+               "pandaset.sensors": ModuleType("pandaset.sensors")}
+    modules["pandaset.annotations"].Cuboids = type("Cuboids", (Sensor,), {})
+    modules["pandaset.sensors"].Lidar = type("Lidar", (Sensor,), {})
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    for frame in range(2):
+        (tmp_path / f"{frame:02d}.pkl.gz").touch()
+    lidar, cuboids = modules["pandaset.sensors"].Lidar(), modules["pandaset.annotations"].Cuboids()
+    assert lidar.files(tmp_path) == []  # The failure on Colab: an empty sweep list.
+    read_gzipped_pandaset()
+    assert len(lidar.files(tmp_path)) == len(cuboids.files(tmp_path)) == 2
 
 
 def similarity(a, b):

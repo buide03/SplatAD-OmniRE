@@ -87,6 +87,20 @@ def sky_masks(scene_dir, overwrite=False):
     return len(images)
 
 
+def read_gzipped_pandaset():
+    """The pinned devkit scans cuboids and LiDAR sweeps as *.pkl; the staged PandaSet stores *.pkl.gz.
+
+    Without the LiDAR override the sweep list is empty and DriveStudio's preprocess fails on frame 0
+    with "list index out of range". pandas infers gzip from the suffix, and the preprocess workers
+    are forked, so they inherit both overrides.
+    """
+    from pandaset.annotations import Cuboids
+    from pandaset.sensors import Lidar
+
+    for sensor in (Cuboids, Lidar):
+        sensor._data_file_extension = property(lambda self: "pkl.gz")
+
+
 def prepare(args):
     scene_dir = args.processed / args.scene
     marker = scene_dir / "research-prepared.json"
@@ -96,10 +110,7 @@ def prepare(args):
     if marker.is_file() and read_json(marker) == expected:
         print(f"OmniRe input for {args.scene} is ready in {scene_dir}")
         return
-    from pandaset.annotations import Cuboids
-
-    # The pinned devkit scans for .pkl, while the staged PandaSet stores .pkl.gz (as in omnire-pose.sh).
-    Cuboids._data_file_extension = property(lambda self: "pkl.gz")
+    read_gzipped_pandaset()
     run_module("datasets.preprocess", [
         "--dataset", "pandaset", "--data_root", args.raw, "--target_dir", args.processed,
         "--scene_ids", args.scene, "--workers", "2", "--process_keys", *PROCESS_KEYS,
