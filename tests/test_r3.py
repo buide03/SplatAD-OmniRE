@@ -386,6 +386,17 @@ def test_r3_velocity_includes_box_motion_and_has_gradients(pedestrian_model_clas
     assert person.translation.grad is not None and person.translation.grad.abs().sum() > 0
 
 
+def far_evidence_stub():
+    """One keypoint observation of the far walker from a side camera and one LiDAR sweep in its box."""
+    camera = {"camera_rotation": [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]],
+              "camera_origin": [0.0, -10.0, 0.0], "intrinsics": {"fx": 1000.0, "fy": 1000.0, "cx": 960.0, "cy": 540.0}}
+    keypoints = {"walker": [{"timestamp_s": 0.5, "keypoints_xy": [[2960.0, 520.0]] * 17,
+                             "scores": [0.0] * 5 + [0.9] * 12, "bbox_xyxy": [2900.0, 480.0, 3000.0, 600.0],
+                            **camera}]}
+    sweeps = {"walker": [(5, np.array([[0.0, 0.0, 0.1], [0.05, 0.0, 0.3]], np.float32))]}
+    return keypoints, sweeps, [i / 10 for i in range(11)]
+
+
 def gradient_matrix(module, monkeypatch):
     """Back-propagate a render stand-in and every R3 loss on their own; report which groups move."""
     import random
@@ -395,7 +406,7 @@ def gradient_matrix(module, monkeypatch):
     planes = {"smpl": {str(i): [0, 0, 1, 0] for i in range(11)}}
     monkeypatch.setattr(module.PedestrianModel, "ground_inputs",
                         lambda self, manifest: ({"smpl": set(range(11))}, planes))
-    model = build_model(module, monkeypatch, "R3")
+    model = build_model(module, monkeypatch, "R3", evidence=far_evidence_stub())
     person = model.people[0]
     with torch.no_grad():
         # Real training is never this clean: a jittered root, a sunken foot, a needle Gaussian
@@ -411,7 +422,7 @@ def gradient_matrix(module, monkeypatch):
     }
     walker = model.people[1]
     with torch.no_grad():
-        walker.translation[5] += torch.tensor([0.02, -0.03, 0.01])
+        walker.translation[5] += torch.tensor([0.02, -0.03, -0.06])  # and a far foot below its floor
     groups = {
         "Gaussian nền/xe": [bank[name] for name in ("means", "quats", "scales", "opacities", "features_dc")],
         "Gaussian SMPL": [person.means, person.quats, person.scales, person.opacities, person.features_dc],
@@ -455,9 +466,14 @@ def test_r3_gradients_reach_meshes_poses_and_box(pedestrian_model_class, monkeyp
     assert rows["r3_trans_smooth"] == rows["r3_joint_smooth"] == {"Pose SMPL", "Pose người xa", "Quỹ đạo hộp"}
     assert rows["r3_local_offset"] == {"Pose SMPL", "Pose người xa"}
     # Ground contact: the near track on its LiDAR planes, the far walker on its cuboid floor. The toy
-    # walker's box slides at 4 m/s, too fast for a planted foot, and it starts on its floor, so none of the
-    # three terms has a gradient for it here. test_far_walker_stands_on_its_cuboid_floor covers it.
-    assert rows["r3_foot_contact"] == rows["r3_ground_penetration"] == rows["r3_foot_slip"] == {"Pose SMPL", "Quỹ đạo hộp"}
+    # walker's box slides at 4 m/s, too fast for a planted foot, so only the sunken foot reaches it here;
+    # test_far_walker_stands_on_its_cuboid_floor covers stance and slip.
+    assert rows["r3_foot_contact"] == rows["r3_foot_slip"] == {"Pose SMPL", "Quỹ đạo hộp"}
+    assert rows["r3_ground_penetration"] == {"Pose SMPL", "Pose người xa", "Quỹ đạo hộp"}
+    # Keypoints move the far pose and its box; LiDAR also moves its Gaussian centres. Neither touches the
+    # near track or the background.
+    assert rows["r3_keypoint"] == {"Pose người xa", "Quỹ đạo hộp"}
+    assert rows["r3_lidar_fit"] == {"Pose người xa", "Gaussian người xa", "Quỹ đạo hộp"}
     assert rows["r3_knn"] == rows["r3_max_scale"] == {"Gaussian SMPL", "Gaussian người xa"}
     assert "r3_out_of_bound" not in rows
 
@@ -665,3 +681,31 @@ def test_scene_gait_is_saved_and_lent_to_a_scene_without_near_walkers(pedestrian
     assert route["representation"] == "smpl_gait" and route["gait_source"] == "library"
     assert route["gait_donors"] == ["scene 028"] and route["gait_period_s"] == pytest.approx(0.6, abs=0.03)
     assert not (library / "030.json").exists()  # A scene without walkers saves nothing.
+
+
+def test_r3_far_terms_fall_when_adam_steps_the_param_groups(pedestrian_model_class, monkeypatch):
+    """The training loop sums every loss in the dict and steps each param group; far terms must fall."""
+    model = build_model(pedestrian_model_class, monkeypatch, "R3", evidence=far_evidence_stub())
+    groups = model.get_param_groups()
+    rates = {"smpl_translation": 3e-4, "smpl_root_rotation": 2e-4, "smpl_body_rotation": 2e-4}
+    optimizer = torch.optim.Adam([{"params": params, "lr": rates.get(name, 1.6e-4)}
+                                  for name, params in groups.items() if name.startswith("smpl_")], eps=1e-15)
+    walker = model.people[1]
+    fit = model.far_fits["1"]
+    with torch.no_grad():
+        # Keypoints about 0.15 box heights off, as after the phase search; far outliers are ignored by design.
+        pixel, _ = fit.project(walker)
+        fit.kp_xy.copy_(pixel + torch.tensor([12.0, -8.0]))
+    start = {key: float(value.detach()) for key, value in model.far_losses().items()}
+    before = [p.detach().clone() for p in (walker.body, walker.translation)]
+    for _ in range(300):
+        optimizer.zero_grad()
+        model.last_actor_time = torch.tensor(0.5)  # set by scene_gaussians during a training render
+        losses = model.r3_losses()
+        sum(losses.values()).backward()
+        optimizer.step()
+    end = {key: float(value.detach()) for key, value in model.far_losses().items()}
+    print("far terms before/after 300 Adam steps:", {k: (round(start[k], 4), round(end[k], 4)) for k in start})
+    assert set(start) == {"r3_keypoint", "r3_lidar_fit"}
+    assert end["r3_keypoint"] < start["r3_keypoint"] and end["r3_lidar_fit"] < start["r3_lidar_fit"]
+    assert not torch.equal(before[0], walker.body) and not torch.equal(before[1], walker.translation)
