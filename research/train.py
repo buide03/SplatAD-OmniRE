@@ -27,6 +27,10 @@ from .prepare import dump_json, read_json, sha256
 from .quality import QualityHistory
 from .smpl_nodes import GAUSSIAN_PARAMETERS
 
+# R3 checkpoints live apart from those of the R3 that still used a deformation MLP for far walkers, so a
+# finished MLP run is neither resumed nor mistaken for the gait version. The notebook reads the same names.
+RUN_FOLDERS = {"R3": "R3-gait"}
+
 
 def append_jsonl(path, row):
     with Path(path).open("a", encoding="utf-8") as handle:
@@ -297,7 +301,7 @@ def make_config(args):
     settings = {f.name: getattr(base, f.name) for f in fields(TrainerConfig) if f.name != "_target"}
     config = ResearchConfig(**settings)
     config.method_name = "splatad-smpl"
-    config.experiment_name = f"{args.scene}-{args.variant}"
+    config.experiment_name = f"{args.scene}-{RUN_FOLDERS.get(args.variant, args.variant)}"
     config.output_dir = args.output.resolve()
     config.timestamp = args.run_id
     config.max_num_iterations = args.steps
